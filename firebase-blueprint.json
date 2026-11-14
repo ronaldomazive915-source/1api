@@ -1,0 +1,159 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "Registered user of IPTV",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth UID" },
+        "name": { "type": "string", "description": "Display name" },
+        "email": { "type": "string", "description": "User email" },
+        "photoURL": { "type": "string", "description": "Profile picture URL" },
+        "role": { "type": "string", "enum": ["user", "admin", "founder"], "description": "Access level" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Account creation date" },
+        "lastLogin": { "type": "string", "format": "date-time", "description": "Last login date" }
+      },
+      "required": ["uid", "email", "role"]
+    },
+    "M3USource": {
+      "title": "M3U Source",
+      "description": "Configuration for an M3U playlist source",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "url": { "type": "string" },
+        "enabled": { "type": "boolean" },
+        "syncIntervalMinutes": { "type": "number" },
+        "lastSyncAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "url", "enabled"]
+    },
+    "M3USyncJob": {
+      "title": "M3U Sync Job",
+      "description": "History and status of an M3U sync operation",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "status": { "type": "string", "enum": ["IDLE", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"] },
+        "totalFound": { "type": "number" },
+        "moviesFound": { "type": "number" },
+        "seriesFound": { "type": "number" },
+        "episodesFound": { "type": "number" },
+        "channelsFound": { "type": "number" },
+        "importedCount": { "type": "number" },
+        "updatedCount": { "type": "number" },
+        "ignoredCount": { "type": "number" },
+        "errorCount": { "type": "number" },
+        "duplicateCount": { "type": "number" },
+        "startTime": { "type": "string", "format": "date-time" },
+        "endTime": { "type": "string", "format": "date-time" },
+        "progress": { "type": "number" },
+        "currentTask": { "type": "string" }
+      },
+      "required": ["id", "status", "startTime"]
+    },
+    "LiveChannel": {
+      "title": "Live Channel",
+      "description": "Live TV channel from M3U",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "logo": { "type": "string" },
+        "group": { "type": "string" },
+        "country": { "type": "string" },
+        "language": { "type": "string" },
+        "streamUrl": { "type": "string" },
+        "sourceId": { "type": "string" },
+        "enabled": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "streamUrl", "enabled"]
+    },
+    "Category": {
+      "title": "Category",
+      "description": "Content category",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "type": { "type": "string", "enum": ["MOVIE", "TV", "LIVE"] },
+        "count": { "type": "number" }
+      },
+      "required": ["id", "name"]
+    },
+    "M3USyncError": {
+      "title": "M3U Sync Error",
+      "description": "Error details for M3U sync operations",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "jobId": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "item": { "type": "string" },
+        "operation": { "type": "string" },
+        "errorCode": { "type": "string" },
+        "message": { "type": "string" }
+      },
+      "required": ["id", "jobId", "timestamp", "operation", "errorCode", "message"]
+    },
+    "VideoSource": {
+      "title": "Video Source",
+      "description": "Streaming source for a movie or episode",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "contentId": { "type": "number", "description": "TMDB ID of the content" },
+        "contentType": { "type": "string", "enum": ["movie", "tv"] },
+        "seasonNumber": { "type": "number" },
+        "episodeNumber": { "type": "number" },
+        "serverName": { "type": "string" },
+        "url": { "type": "string" },
+        "format": { "type": "string", "enum": ["mp4", "m3u8", "hls", "embed", "iframe", "external"] },
+        "audioLanguage": { "type": "string" },
+        "subtitleLanguage": { "type": "string" },
+        "quality": { "type": "string" },
+        "status": { "type": "string", "enum": ["online", "offline", "verifying", "unverified", "incompatible"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "lastVerifiedAt": { "type": "string", "format": "date-time" },
+        "verificationResult": { "type": "string" }
+      },
+      "required": ["id", "contentId", "contentType", "serverName", "url", "format", "status"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profile document"
+    },
+    "/m3uSources/{sourceId}": {
+      "schema": "M3USource",
+      "description": "M3U source configuration"
+    },
+    "/m3uSyncJobs/{jobId}": {
+      "schema": "M3USyncJob",
+      "description": "M3U sync job status"
+    },
+    "/liveChannels/{channelId}": {
+      "schema": "LiveChannel",
+      "description": "Live TV channel"
+    },
+    "/categories/{categoryId}": {
+      "schema": "Category",
+      "description": "Content category"
+    },
+    "/m3uSyncErrors/{errorId}": {
+      "schema": "M3USyncError",
+      "description": "M3U sync error log"
+    },
+    "/videoSources/{sourceId}": {
+      "schema": "VideoSource",
+      "description": "Streaming sources for movies and series"
+    }
+  }
+}

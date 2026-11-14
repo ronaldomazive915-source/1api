@@ -1,0 +1,1288 @@
+{
+  "catalog": [
+    {
+      "id": "movie-550",
+      "tmdbId": 550,
+      "type": "movie",
+      "title": "Clube da Luta",
+      "originalTitle": "Fight Club",
+      "overview": "Um homem empobrecido deprimido e insone conhece um estranho vendedor de sabão chamado Tyler Durden e juntos eles formam um clube de luta subterrâneo que evolui para algo muito maior.",
+      "posterPath": "/pB8BM7pdSp6B6Ih7QZ4DrQ3PmJK.jpg",
+      "backdropPath": "/hZknoLmAMS39L3A23R922vS123.jpg",
+      "voteAverage": 8.4,
+      "voteCount": 26000,
+      "releaseDate": "1999-10-15",
+      "genres": [
+        "Drama",
+        "Thriller"
+      ],
+      "duration": 139,
+      "trailerUrl": "https://www.youtube.com/watch?v=qtRKdVHc-cE",
+      "featured": true,
+      "trending": true,
+      "popular": true,
+      "topRated": true,
+      "cast": [
+        {
+          "id": 287,
+          "name": "Brad Pitt",
+          "character": "Tyler Durden"
+        },
+        {
+          "id": 819,
+          "name": "Edward Norton",
+          "character": "The Narrator"
+        },
+        {
+          "id": 1283,
+          "name": "Helena Bonham Carter",
+          "character": "Marla Singer"
+        }
+      ],
+      "director": "David Fincher",
+      "createdAt": "2026-09-23T13:06:06.728Z",
+      "updatedAt": "2026-09-23T13:06:06.729Z",
+      "published": true
+    },
+    {
+      "id": "movie-157336",
+      "tmdbId": 157336,
+      "type": "movie",
+      "title": "Interstellar",
+      "originalTitle": "Interstellar",
+      "overview": "As reservas naturais da Terra estão chegando ao fim e um grupo de astronautas recebe a missão de verificar quais planetas podem receber a população humana.",
+      "posterPath": "/gEU2QniE6E77NI6lCU6MxlNBvIx.jpg",
+      "backdropPath": "/xJHokMbljvjADYdit5fK1T22S38.jpg",
+      "voteAverage": 8.4,
+      "voteCount": 32000,
+      "releaseDate": "2014-11-05",
+      "genres": [
+        "Ficção Científica",
+        "Aventura",
+        "Drama"
+      ],
+      "duration": 169,
+      "trailerUrl": "https://www.youtube.com/watch?v=zSWdZVtXT7E",
+      "featured": true,
+      "trending": true,
+      "popular": true,
+      "topRated": true,
+      "cast": [
+        {
+          "id": 10296,
+          "name": "Matthew McConaughey",
+          "character": "Cooper"
+        },
+        {
+          "id": 1813,
+          "name": "Anne Hathaway",
+          "character": "Brand"
+        },
+        {
+          "id": 3895,
+          "name": "Jessica Chastain",
+          "character": "Murph"
+        }
+      ],
+      "director": "Christopher Nolan",
+      "createdAt": "2026-09-23T13:06:06.729Z",
+      "updatedAt": "2026-09-23T13:06:06.729Z",
+      "published": true
+    },
+    {
+      "id": "movie-27205",
+      "tmdbId": 27205,
+      "type": "movie",
+      "title": "A Origem",
+      "originalTitle": "Inception",
+      "overview": "Dom Cobb é um ladrão com a rara habilidade de roubar segredos do inconsciente durante o estado de sonho. Impedido de retornar para sua família, ele recebe a chance de se redimir.",
+      "posterPath": "/9gk7adHYeDvHkCSEqAvQNLV5Uge.jpg",
+      "backdropPath": "/8ZTVqvKDQ8P3Ajw33uA32K1q3v.jpg",
+      "voteAverage": 8.3,
+      "voteCount": 35000,
+      "releaseDate": "2010-07-15",
+      "genres": [
+        "Ação",
+        "Ficção Científica",
+        "Aventura"
+      ],
+      "duration": 148,
+      "featured": true,
+      "trending": true,
+      "popular": true,
+      "topRated": true,
+      "cast": [
+        {
+          "id": 6193,
+          "name": "Leonardo DiCaprio",
+          "character": "Cobb"
+        },
+        {
+          "id": 24045,
+          "name": "Joseph Gordon-Levitt",
+          "character": "Arthur"
+        },
+        {
+          "id": 27578,
+          "name": "Elliot Page",
+          "character": "Ariadne"
+        }
+      ],
+      "director": "Christopher Nolan",
+      "createdAt": "2026-09-23T13:06:06.729Z",
+      "updatedAt": "2026-09-23T13:06:06.729Z",
+      "published": true
+    },
+    {
+      "id": "series-1399",
+      "tmdbId": 1399,
+      "type": "tv",
+      "title": "Game of Thrones",
+      "originalTitle": "Game of Thrones",
+      "overview": "Setem reinos de Westeros lutam pelo controle do Trono de Ferro enquanto uma ameaça antiga desperta nas terras congeladas do norte.",
+      "posterPath": "/1XS1oqL89opfnbLl8Wn2C14YFiB.jpg",
+      "backdropPath": "/2OMB0ynKly8enMJWI2Dy9I4S2A.jpg",
+      "voteAverage": 8.4,
+      "voteCount": 23000,
+      "firstAirDate": "2011-04-17",
+      "genres": [
+        "Sci-Fi & Fantasy",
+        "Drama",
+        "Ação"
+      ],
+      "seasonsCount": 8,
+      "episodesCount": 73,
+      "featured": true,
+      "trending": true,
+      "popular": true,
+      "topRated": true,
+      "seasons": [
+        {
+          "id": "s1",
+          "seasonNumber": 1,
+          "name": "Temporada 1",
+          "episodeCount": 10,
+          "episodes": [
+            {
+              "id": "e1",
+              "seasonNumber": 1,
+              "episodeNumber": 1,
+              "title": "O Inverno Está Chegando",
+              "overview": "Lord Eddard Stark é alertado por seu rei sobre ameaças iminentes.",
+              "duration": 62
+            },
+            {
+              "id": "e2",
+              "seasonNumber": 1,
+              "episodeNumber": 2,
+              "title": "A Estrada Real",
+              "overview": "Os Stark viajam rumo a Porto Real enquanto Jon Snow segue para a Muralha.",
+              "duration": 56
+            }
+          ]
+        }
+      ],
+      "createdAt": "2026-09-23T13:06:06.729Z",
+      "updatedAt": "2026-09-23T13:06:06.729Z",
+      "published": true
+    },
+    {
+      "id": "series-60914",
+      "tmdbId": 60914,
+      "type": "tv",
+      "title": "A Gantz de Wall Street",
+      "originalTitle": "The Mandalorian",
+      "overview": "As viagens de um caçador de recompensas solitário nos confins da galáxia, longe da autoridade da Nova República.",
+      "posterPath": "/eA23634336.jpg",
+      "backdropPath": "/o7DIs1f3fJ914.jpg",
+      "voteAverage": 8.5,
+      "firstAirDate": "2019-11-12",
+      "genres": [
+        "Sci-Fi & Fantasy",
+        "Ação"
+      ],
+      "seasonsCount": 3,
+      "episodesCount": 24,
+      "popular": true,
+      "trending": true,
+      "createdAt": "2026-09-23T13:06:06.729Z",
+      "updatedAt": "2026-09-23T13:06:06.729Z",
+      "published": true
+    }
+  ],
+  "users": [
+    {
+      "id": "user-founder",
+      "name": "Fundador RONYCINE",
+      "email": "ronaldomazive915@gmail.com",
+      "role": "founder",
+      "createdAt": "2026-09-23T13:06:06.729Z",
+      "lastLogin": "2026-10-08T10:55:51.345Z"
+    }
+  ],
+  "progress": [],
+  "history": [],
+  "myList": [],
+  "auditLogs": [
+    {
+      "id": "log-1",
+      "timestamp": "2026-09-23T13:06:06.729Z",
+      "userEmail": "system",
+      "action": "SYNC",
+      "result": "SUCCESS",
+      "details": "Banco de dados inicializado com sucesso para PLAYFILME+."
+    }
+  ],
+  "importHistory": [],
+  "settings": {
+    "heroRotationInterval": 30,
+    "catalogGuardEnabled": true,
+    "minCatalogThreshold": 5
+  },
+  "viewsCount": 124,
+  "streamSources": [],
+  "streamtapeQueue": [],
+  "streamtapeLogs": [
+    {
+      "id": "st-log-1791457119919-1pjd",
+      "timestamp": "2026-10-08T10:58:39.919Z",
+      "type": "deleted",
+      "message": "Arquivo ST_FIGHTCLUB_123 excluído do Streamtape."
+    },
+    {
+      "id": "st-log-1791457108594-4x63",
+      "timestamp": "2026-10-08T10:58:28.594Z",
+      "type": "error",
+      "message": "Erro no Remote Upload de \"Conteúdo TMDB 999\": Endereço local ou de metadados não permitido por segurança.",
+      "tmdbId": 999
+    },
+    {
+      "id": "st-log-1791457108591-1zgs",
+      "timestamp": "2026-10-08T10:58:28.591Z",
+      "type": "remote_upload",
+      "message": "Iniciando Remote Upload: Conteúdo TMDB 999",
+      "tmdbId": 999
+    },
+    {
+      "id": "st-log-1791457093008-l3tc",
+      "timestamp": "2026-10-08T10:58:13.008Z",
+      "type": "error",
+      "message": "Erro no Remote Upload de \"Série Exemplo\": Credenciais da API do Streamtape não estão configuradas no backend.",
+      "tmdbId": 67890
+    },
+    {
+      "id": "st-log-1791457093006-vrs0",
+      "timestamp": "2026-10-08T10:58:13.006Z",
+      "type": "remote_upload",
+      "message": "Iniciando Remote Upload: Série Exemplo",
+      "tmdbId": 67890
+    },
+    {
+      "id": "st-log-1791457092503-3rvl",
+      "timestamp": "2026-10-08T10:58:12.503Z",
+      "type": "error",
+      "message": "Erro no Remote Upload de \"Filme Exemplo\": Credenciais da API do Streamtape não estão configuradas no backend.",
+      "tmdbId": 12345
+    },
+    {
+      "id": "st-log-1791457092490-0l12",
+      "timestamp": "2026-10-08T10:58:12.490Z",
+      "type": "remote_upload",
+      "message": "Iniciando Remote Upload: Filme Exemplo",
+      "tmdbId": 12345
+    },
+    {
+      "id": "st-log-1791457092488-szdg",
+      "timestamp": "2026-10-08T10:58:12.488Z",
+      "type": "remote_upload",
+      "message": "Importação em massa enfileirada: 2 itens adicionados, 0 ignorados."
+    },
+    {
+      "id": "st-log-1791457085944-efwr",
+      "timestamp": "2026-10-08T10:58:05.944Z",
+      "type": "sync",
+      "message": "Arquivo ST_FIGHTCLUB_123 atualizado com sucesso do Streamtape (Status: ERROR)",
+      "fileId": "ST_FIGHTCLUB_123"
+    },
+    {
+      "id": "st-log-1791457063571-baum",
+      "timestamp": "2026-10-08T10:57:43.571Z",
+      "type": "associated",
+      "message": "Arquivo Streamtape [ST_FIGHTCLUB_123] associado a: Clube da Luta (TMDB 550)",
+      "fileId": "ST_FIGHTCLUB_123",
+      "tmdbId": 550
+    },
+    {
+      "id": "st-log-1791457043129-bhn2",
+      "timestamp": "2026-10-08T10:57:23.129Z",
+      "type": "error",
+      "message": "Falha no teste de conexão Streamtape: STREAMTAPE_API_LOGIN ou STREAMTAPE_API_KEY ausentes no backend."
+    }
+  ],
+  "streamtapeConfig": {
+    "apiLoginConfigured": false,
+    "apiKeyConfigured": false,
+    "status": "DISCONNECTED",
+    "defaultProvider": false,
+    "lastTestedAt": "2026-10-08T10:57:23.127Z"
+  },
+  "massImportReports": [],
+  "recoveryState": {
+    "id": "recovery-default",
+    "status": "IDLE",
+    "totalItems": 0,
+    "processedItems": 0,
+    "successCount": 0,
+    "errorCount": 0,
+    "ignoredCount": 0,
+    "issuesFound": 0
+  },
+  "recoveryIssues": [],
+  "recoverySnapshots": [],
+  "recoveryHistory": [],
+  "recoveryReports": [],
+  "activityLogs": [
+    {
+      "id": "act-1791457101700-px3",
+      "time": "10:58:21",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791457101094-s7z",
+      "time": "10:58:21",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791457029737-me1",
+      "time": "10:57:09",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791457029168-eaw",
+      "time": "10:57:09",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791456969741-cv1",
+      "time": "10:56:09",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791456969168-kl9",
+      "time": "10:56:09",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791456909739-ren",
+      "time": "10:55:09",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791456909168-fll",
+      "time": "10:55:09",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791456849735-0ag",
+      "time": "10:54:09",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791456849166-wg7",
+      "time": "10:54:09",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791456789735-e8x",
+      "time": "10:53:09",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791456789165-u60",
+      "time": "10:53:09",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791456729737-z8j",
+      "time": "10:52:09",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791456729166-eqm",
+      "time": "10:52:09",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791456669738-js7",
+      "time": "10:51:09",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791456669166-ker",
+      "time": "10:51:09",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791456609739-hcr",
+      "time": "10:50:09",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791456609165-kqq",
+      "time": "10:50:09",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791456549734-aue",
+      "time": "10:49:09",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791456549164-r6s",
+      "time": "10:49:09",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791456489737-7ce",
+      "time": "10:48:09",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791456489164-j6w",
+      "time": "10:48:09",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791456429730-i2l",
+      "time": "10:47:09",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791456429163-vfz",
+      "time": "10:47:09",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791456369731-20t",
+      "time": "10:46:09",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791456369162-rba",
+      "time": "10:46:09",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791456309736-h4w",
+      "time": "10:45:09",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791456309162-8dj",
+      "time": "10:45:09",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791456249737-741",
+      "time": "10:44:09",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791456249161-wnx",
+      "time": "10:44:09",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791456189732-o12",
+      "time": "10:43:09",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791456189162-q3w",
+      "time": "10:43:09",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791456129733-elh",
+      "time": "10:42:09",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791456129161-mfr",
+      "time": "10:42:09",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791456069732-yjf",
+      "time": "10:41:09",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791456069161-2f6",
+      "time": "10:41:09",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791456009728-tnv",
+      "time": "10:40:09",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791456009159-g9t",
+      "time": "10:40:09",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791455949738-wph",
+      "time": "10:39:09",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791455949158-kps",
+      "time": "10:39:09",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791455889724-608",
+      "time": "10:38:09",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791455889157-p2l",
+      "time": "10:38:09",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791455829726-dlm",
+      "time": "10:37:09",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791455829157-j54",
+      "time": "10:37:09",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791455769727-h5g",
+      "time": "10:36:09",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791455769157-phn",
+      "time": "10:36:09",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791455709726-bbj",
+      "time": "10:35:09",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791455709156-rai",
+      "time": "10:35:09",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791455649723-ede",
+      "time": "10:34:09",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791455649155-7lf",
+      "time": "10:34:09",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791455590870-m0u",
+      "time": "10:33:10",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791455589245-fzy",
+      "time": "10:33:09",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791322370135-7fh",
+      "time": "21:32:50",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791322368882-59t",
+      "time": "21:32:48",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791322309454-udn",
+      "time": "21:31:49",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791322308881-p5v",
+      "time": "21:31:48",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791322249446-q1o",
+      "time": "21:30:49",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791322248880-kc1",
+      "time": "21:30:48",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791322189450-g57",
+      "time": "21:29:49",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791322188879-us9",
+      "time": "21:29:48",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791322129445-flk",
+      "time": "21:28:49",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791322128879-4pj",
+      "time": "21:28:48",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791322069446-30n",
+      "time": "21:27:49",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791322068879-s77",
+      "time": "21:27:48",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791322009497-zf9",
+      "time": "21:26:49",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791322008879-1fd",
+      "time": "21:26:48",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791321949452-b33",
+      "time": "21:25:49",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791321948878-cr3",
+      "time": "21:25:48",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791321889447-2sr",
+      "time": "21:24:49",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791321888878-b84",
+      "time": "21:24:48",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791321829447-x5a",
+      "time": "21:23:49",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791321828877-bve",
+      "time": "21:23:48",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791321769448-8bs",
+      "time": "21:22:49",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791321768877-21e",
+      "time": "21:22:48",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791321709445-hh2",
+      "time": "21:21:49",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791321708877-f3y",
+      "time": "21:21:48",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791321649447-anf",
+      "time": "21:20:49",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791321648876-h4f",
+      "time": "21:20:48",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791321589443-0lq",
+      "time": "21:19:49",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791321588875-bgt",
+      "time": "21:19:48",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791321529449-8fp",
+      "time": "21:18:49",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791321528875-n6u",
+      "time": "21:18:48",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791321469446-tbx",
+      "time": "21:17:49",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791321468875-nn2",
+      "time": "21:17:48",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1791321409549-2gp",
+      "time": "21:16:49",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1791321408926-xp6",
+      "time": "21:16:48",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790171006687-izq",
+      "time": "13:43:26",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790171002313-n5e",
+      "time": "13:43:22",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790170942773-yl9",
+      "time": "13:42:22",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790170942313-jrq",
+      "time": "13:42:22",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790170887803-t0v",
+      "time": "13:41:27",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790170882311-wsh",
+      "time": "13:41:22",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790170826954-zai",
+      "time": "13:40:26",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790170822310-goa",
+      "time": "13:40:22",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790170762769-8wo",
+      "time": "13:39:22",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790170762310-jnx",
+      "time": "13:39:22",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790170706642-rvi",
+      "time": "13:38:26",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790170702310-z4u",
+      "time": "13:38:22",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790170642938-de9",
+      "time": "13:37:22",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790170642309-w01",
+      "time": "13:37:22",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790170607676-tto",
+      "time": "13:36:47",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790170582309-fy4",
+      "time": "13:36:22",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790170528523-215",
+      "time": "13:35:28",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790170522308-ono",
+      "time": "13:35:22",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790170464548-4fc",
+      "time": "13:34:24",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790170462308-rn2",
+      "time": "13:34:22",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790170403525-dym",
+      "time": "13:33:23",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790170402307-cbn",
+      "time": "13:33:22",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790170342746-kap",
+      "time": "13:32:22",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790170342306-p20",
+      "time": "13:32:22",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790170282776-f60",
+      "time": "13:31:22",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790170282305-7a4",
+      "time": "13:31:22",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790170222752-s61",
+      "time": "13:30:22",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790170222305-jfd",
+      "time": "13:30:22",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790170162907-28u",
+      "time": "13:29:22",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790170162304-lj6",
+      "time": "13:29:22",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790170102744-hdf",
+      "time": "13:28:22",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790170102302-80h",
+      "time": "13:28:22",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790170042818-99w",
+      "time": "13:27:22",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790170042301-vul",
+      "time": "13:27:22",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790169983077-c15",
+      "time": "13:26:23",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790169982301-qbw",
+      "time": "13:26:22",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790169956198-zfm",
+      "time": "13:25:56",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790169922299-1ed",
+      "time": "13:25:22",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790169866909-1wj",
+      "time": "13:24:26",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790169862299-9we",
+      "time": "13:24:22",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790169806710-zw3",
+      "time": "13:23:26",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790169802322-7vy",
+      "time": "13:23:22",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790169738896-vgx",
+      "time": "13:22:18",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790169735328-su9",
+      "time": "13:22:15",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790169675830-i9r",
+      "time": "13:21:15",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790169675336-frn",
+      "time": "13:21:15",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790169607370-4xs",
+      "time": "13:20:07",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790169606882-x47",
+      "time": "13:20:06",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790169547315-bwt",
+      "time": "13:19:07",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790169546880-q3k",
+      "time": "13:19:06",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790169487330-nwv",
+      "time": "13:18:07",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790169486880-iu8",
+      "time": "13:18:06",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790169431298-wr5",
+      "time": "13:17:11",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790169306878-5uj",
+      "time": "13:15:06",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790169247381-2tu",
+      "time": "13:14:07",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790169246878-0wt",
+      "time": "13:14:06",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790169187365-mlo",
+      "time": "13:13:07",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790169186876-kbc",
+      "time": "13:13:06",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790169127313-9q1",
+      "time": "13:12:07",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790169126875-qf4",
+      "time": "13:12:06",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790169067363-qco",
+      "time": "13:11:07",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790169066875-j66",
+      "time": "13:11:06",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790169019210-0eg",
+      "time": "13:10:19",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790169006875-yut",
+      "time": "13:10:06",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790168950283-e2t",
+      "time": "13:09:10",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790168946873-dx1",
+      "time": "13:09:06",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790168905471-2ka",
+      "time": "13:08:25",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790168886872-vcw",
+      "time": "13:08:06",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-1790168827381-cha",
+      "time": "13:07:07",
+      "type": "error",
+      "message": "Falha na sincronização M3U: Falha no download da playlist: HTTP 403 (Forbidden)"
+    },
+    {
+      "id": "act-1790168826872-737",
+      "time": "13:07:06",
+      "type": "info",
+      "message": "Sincronização M3U iniciada para fonte \"Lista M3U Principal (BugouMods)\"."
+    },
+    {
+      "id": "act-init",
+      "time": "13:06:06",
+      "type": "success",
+      "message": "Conexão com o banco de dados PLAYFILME estabelecida com sucesso."
+    }
+  ]
+}
