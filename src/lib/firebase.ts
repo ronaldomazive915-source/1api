@@ -1,6 +1,6 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider } from 'firebase/auth';
-import { getFirestore, doc, getDoc } from 'firebase/firestore';
+import { getFirestore } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
 const app = initializeApp(firebaseConfig);
@@ -57,14 +57,3 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
   console.warn('Firestore Error Handled: ', JSON.stringify(errInfo));
   return errInfo;
 }
-
-async function testConnection() {
-  try {
-    await getDoc(doc(db, 'test', 'connection'));
-    console.log('[IPTV AUTH] Firebase Connection Initialized');
-  } catch (error) {
-    console.warn('[IPTV AUTH] Firebase operating in resilient mode.');
-  }
-}
-
-testConnection();

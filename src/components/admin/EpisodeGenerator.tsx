@@ -28,7 +28,8 @@ import {
   Season,
   SeasonSourceTemplate,
   TmdbSearchResult,
-  VideoSource
+  VideoSource,
+  SeriesComparisonReport
 } from '../../types.js';
 import { MgebUrlField } from './MgebUrlField.js';
 import {
@@ -37,8 +38,15 @@ import {
   stripMgebPrefix
 } from '../../lib/mgebUtils.js';
 import { resolveTmdbPosterUrl } from '../../lib/mediaUtils.js';
+import { classifySourceUrl } from '../../lib/sourceClassification.js';
 import { RonycinePlayer } from '../player/RonycinePlayer.js';
 import { ErrorBoundary } from '../ErrorBoundary.js';
+import {
+  AUDIO_LANGUAGE_OPTIONS,
+  SOURCE_QUALITY_OPTIONS,
+  VERSION_TYPE_OPTIONS,
+  isPresetAudioLanguage
+} from '../../lib/sourceMetadata.js';
 
 interface EpisodeGeneratorProps {
   catalogSeries: MediaItem[];
@@ -67,6 +75,10 @@ export const EpisodeGenerator: React.FC<EpisodeGeneratorProps> = ({
   const [selectedSeries, setSelectedSeries] = useState<MediaItem | null>(null);
   const [existsInCatalog, setExistsInCatalog] = useState<boolean>(false);
   const [loadingDetails, setLoadingDetails] = useState(false);
+  const [comparisonStats, setComparisonStats] = useState<SeriesComparisonReport | null>(null);
+  const [showAllLocalSeries, setShowAllLocalSeries] = useState(false);
+  const [previewPage, setPreviewPage] = useState(1);
+  const [showAllPreview, setShowAllPreview] = useState(false);
 
   // Season & episode range config
   const [selectedSeasonNum, setSelectedSeasonNum] = useState<number>(1);
@@ -83,6 +95,9 @@ export const EpisodeGenerator: React.FC<EpisodeGeneratorProps> = ({
   const [serverName, setServerName] = useState<string>('MGEB Endpoint');
   const [format, setFormat] = useState<string>('php_endpoint');
   const [audioLanguage, setAudioLanguage] = useState<string>('Português');
+  const [versionType, setVersionType] = useState<string>('dublado');
+  const [subtitleUrl, setSubtitleUrl] = useState<string>('');
+  const [subtitleLanguage, setSubtitleLanguage] = useState<string>('');
   const [quality, setQuality] = useState<string>('1080p');
   const [isPrimary, setIsPrimary] = useState<boolean>(true);
   const [priority, setPriority] = useState<number>(1);
@@ -93,19 +108,40 @@ export const EpisodeGenerator: React.FC<EpisodeGeneratorProps> = ({
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [validations, setValidations] = useState<Record<number, LinkValidationState>>({});
   const [testingBatch, setTestingBatch] = useState(false);
-  const [playTestEpisode, setPlayTestEpisode] = useState<{ episodeNumber: number; url: string; title?: string } | null>(null);
+  const [testBatchProgress, setTestBatchProgress] = useState<{ done: number; total: number } | null>(null);
+  const cancelBatchRef = useRef<boolean>(false);
 
-  // Confirmation modal
+  const [playTestEpisode, setPlayTestEpisode] = useState<{ episodeNumber: number; url: string; title?: string } | null>(null);
+  const [playTestDiag, setPlayTestDiag] = useState<{
+    status: 'playing' | 'confirmed' | 'format_error' | 'connection_error';
+    message: string;
+  }>({ status: 'playing', message: 'A inicializar reprodução do episódio...' });
+
+  // Confirmation modal & resumable chunked saving
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [conflictMode, setConflictMode] = useState<'skip' | 'add_alternative' | 'overwrite'>('skip');
   const [savingBatch, setSavingBatch] = useState(false);
+  const [saveProgress, setSaveProgress] = useState<{ done: number; total: number; saved: number } | null>(null);
+  const [interruptedBatchStart, setInterruptedBatchStart] = useState<number | null>(null);
   const [saveFeedback, setSaveFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  const refreshComparison = async (tmdbId: number) => {
+    try {
+      const res = await api.getSeriesComparison(tmdbId, true);
+      if (res?.report) setComparisonStats(res.report);
+    } catch {
+      // non-fatal
+    }
+  };
 
   const selectSeriesById = async (tmdbId: number, fallbackItem?: Partial<MediaItem>) => {
     setLoadingDetails(true);
     setSaveFeedback(null);
     setTemplateNotice(null);
     setValidations({});
+    setComparisonStats(null);
+    setInterruptedBatchStart(null);
+    setPreviewPage(1);
     const localMatch = catalogSeries.find(m => Number(m.tmdbId) === Number(tmdbId));
     setExistsInCatalog(Boolean(localMatch));
 
@@ -135,12 +171,17 @@ export const EpisodeGenerator: React.FC<EpisodeGeneratorProps> = ({
       if (detailsRes?.existsInCatalog !== undefined) {
         setExistsInCatalog(Boolean(detailsRes.existsInCatalog));
       }
+      if (detailsRes?.comparisonStats) {
+        setComparisonStats(detailsRes.comparisonStats);
+      } else {
+        refreshComparison(tmdbId);
+      }
 
       if (resolvedSeries) {
         setSelectedSeries(resolvedSeries);
         const usableSeasons = (resolvedSeries.seasons || []).filter(s => Number(s.seasonNumber) > 0);
         const firstSeason = usableSeasons[0] || resolvedSeries.seasons?.[0];
-        const initialSeasonNum = firstSeason ? Number(firstSeason.seasonNumber) : 1;
+        const initialSeasonNum = firstSeason !== undefined ? Number(firstSeason.seasonNumber) : 1;
         applySeasonSelection(initialSeasonNum, resolvedSeries, tmplMap);
       }
     } finally {
@@ -171,11 +212,16 @@ export const EpisodeGenerator: React.FC<EpisodeGeneratorProps> = ({
       if (savedTmpl.serverName) setServerName(savedTmpl.serverName);
       if (savedTmpl.format) setFormat(savedTmpl.format);
       if (savedTmpl.audioLanguage) setAudioLanguage(savedTmpl.audioLanguage);
+      if (savedTmpl.versionType) setVersionType(savedTmpl.versionType);
+      setSubtitleUrl(savedTmpl.subtitleUrl || '');
+      setSubtitleLanguage(savedTmpl.subtitleLanguage || '');
       if (savedTmpl.quality) setQuality(savedTmpl.quality);
       setTemplateNotice(`Modelo salvo da Temporada ${seasonNum} carregado automaticamente.`);
     } else {
       setFirstLinkUrl('');
       setUseMgebPrefix(true);
+      setSubtitleUrl('');
+      setSubtitleLanguage('');
       setTemplateNotice(null);
     }
 
@@ -284,9 +330,9 @@ export const EpisodeGenerator: React.FC<EpisodeGeneratorProps> = ({
       if (
         Number(s.contentId) === Number(selectedSeries.tmdbId) &&
         normType === 'tv' &&
-        Number(s.seasonNumber || 1) === Number(selectedSeasonNum)
+        Number(s.seasonNumber ?? 1) === Number(selectedSeasonNum)
       ) {
-        const epNum = Number(s.episodeNumber || 1);
+        const epNum = Number(s.episodeNumber ?? 1);
         if (!map[epNum]) map[epNum] = [];
         map[epNum].push(s);
       }
@@ -337,36 +383,50 @@ export const EpisodeGenerator: React.FC<EpisodeGeneratorProps> = ({
 
   const handleTestAllLinks = async () => {
     if (!generatedResult.valid || generatedResult.links.length === 0) return;
+    cancelBatchRef.current = false;
     setTestingBatch(true);
+    const total = generatedResult.links.length;
+    setTestBatchProgress({ done: 0, total });
+
     const pendingState: Record<number, LinkValidationState> = {};
     for (const l of generatedResult.links) {
       pendingState[l.episodeNumber] = { status: 'testing' };
     }
     setValidations(pendingState);
 
+    const CHUNK = 30;
     try {
-      const res = await api.verifyBatchSourceLinks(
-        generatedResult.links.map(l => ({ episodeNumber: l.episodeNumber, url: l.url }))
-      );
-      const nextState: Record<number, LinkValidationState> = {};
-      for (const item of res.results || []) {
-        nextState[item.episodeNumber] = {
-          status: (item.probe?.status as any) || 'unverifiable',
-          message: item.probe?.message
-        };
+      for (let i = 0; i < total; i += CHUNK) {
+        if (cancelBatchRef.current) break;
+        const slice = generatedResult.links.slice(i, i + CHUNK);
+        try {
+          const res = await api.verifyBatchSourceLinks(
+            slice.map(l => ({ episodeNumber: l.episodeNumber, url: l.url }))
+          );
+          setValidations(prev => {
+            const next = { ...prev };
+            for (const item of res.results || []) {
+              next[item.episodeNumber] = {
+                status: (item.probe?.status as any) || 'unverifiable',
+                message: item.probe?.message
+              };
+            }
+            return next;
+          });
+        } catch (err: any) {
+          setValidations(prev => {
+            const next = { ...prev };
+            for (const l of slice) {
+              next[l.episodeNumber] = {
+                status: 'unverifiable',
+                message: err?.message || 'Timeout/erro ao validar lote.'
+              };
+            }
+            return next;
+          });
+        }
+        setTestBatchProgress({ done: Math.min(total, i + slice.length), total });
       }
-      setValidations(nextState);
-    } catch (err: any) {
-      const errState: Record<number, LinkValidationState> = {};
-      for (const l of generatedResult.links) {
-        errState[l.episodeNumber] = {
-          status: 'unverifiable',
-          message:
-            err?.message ||
-            'Não foi possível confirmar a reprodução automaticamente. A fonte necessita de teste no player.'
-        };
-      }
-      setValidations(errState);
     } finally {
       setTestingBatch(false);
     }
@@ -384,7 +444,10 @@ export const EpisodeGenerator: React.FC<EpisodeGeneratorProps> = ({
         useMgebPrefix,
         serverName,
         format,
-        audioLanguage,
+        audioLanguage: audioLanguage.trim() || 'Português',
+        versionType,
+        subtitleUrl: subtitleUrl.trim() || undefined,
+        subtitleLanguage: subtitleLanguage.trim() || undefined,
         quality
       });
       setSeasonTemplates(prev => ({ ...prev, [selectedSeasonNum]: res.template }));
@@ -396,48 +459,85 @@ export const EpisodeGenerator: React.FC<EpisodeGeneratorProps> = ({
     }
   };
 
-  const handleConfirmSaveBatch = async () => {
+  const handleConfirmSaveBatch = async (startIndexOverride = 0) => {
     if (!selectedSeries?.tmdbId || !generatedResult.valid || generatedResult.links.length === 0) return;
+    cancelBatchRef.current = false;
     setSavingBatch(true);
     setSaveFeedback(null);
+    setShowConfirmModal(false);
+
+    const links = generatedResult.links;
+    const total = links.length;
+    const CHUNK = 100;
+    let totalSaved = 0;
+
+    setSaveProgress({ done: startIndexOverride, total, saved: 0 });
 
     try {
-      const res = await api.saveBatchEpisodeSources({
-        contentId: Number(selectedSeries.tmdbId),
-        seasonNumber: selectedSeasonNum,
-        seasonBaseUrl: firstLinkUrl.trim(),
-        useMgebPrefix,
-        serverName: serverName.trim() || 'MGEB Endpoint',
-        format,
-        audioLanguage,
-        quality,
-        isPrimary,
-        priority,
-        enabled,
-        conflictMode,
-        episodes: generatedResult.links.map(l => {
-          const meta = seasonEpisodesMeta[l.episodeNumber];
-          const valState = validations[l.episodeNumber];
-          return {
-            episodeNumber: l.episodeNumber,
-            url: l.url,
-            title: meta?.title,
-            overview: meta?.overview,
-            stillPath: meta?.stillPath,
-            duration: meta?.duration,
-            airDate: meta?.airDate,
-            voteAverage: meta?.voteAverage,
-            status: valState && valState.status !== 'idle' && valState.status !== 'testing' ? valState.status : 'registered'
-          };
-        })
-      });
+      for (let i = startIndexOverride; i < total; i += CHUNK) {
+        if (cancelBatchRef.current) {
+          setInterruptedBatchStart(i);
+          setSaveFeedback({
+            type: 'error',
+            text: `Operação cancelada no episódio ${links[i]?.episodeNumber || i + 1}. ${totalSaved} fonte(s) guardada(s). Pode retomar a partir daqui.`
+          });
+          return;
+        }
 
-      setShowConfirmModal(false);
-      setSaveFeedback({ type: 'success', text: res.message });
+        const chunk = links.slice(i, i + CHUNK);
+        try {
+          const res = await api.saveBatchEpisodeSources({
+            contentId: Number(selectedSeries.tmdbId),
+            seasonNumber: selectedSeasonNum,
+            seasonBaseUrl: firstLinkUrl.trim(),
+            useMgebPrefix,
+            serverName: serverName.trim() || 'MGEB Endpoint',
+            format,
+            audioLanguage: audioLanguage.trim() || 'Português',
+            versionType,
+            subtitleUrl: subtitleUrl.trim() || undefined,
+            subtitleLanguage: subtitleLanguage.trim() || undefined,
+            quality,
+            isPrimary,
+            priority,
+            enabled,
+            conflictMode,
+            episodes: chunk.map(l => {
+              const meta = seasonEpisodesMeta[l.episodeNumber];
+              const valState = validations[l.episodeNumber];
+              return {
+                episodeNumber: l.episodeNumber,
+                url: l.url,
+                title: meta?.title,
+                overview: meta?.overview,
+                stillPath: meta?.stillPath,
+                duration: meta?.duration,
+                airDate: meta?.airDate,
+                voteAverage: meta?.voteAverage,
+                status: valState && valState.status !== 'idle' && valState.status !== 'testing' ? valState.status : 'registered'
+              };
+            })
+          });
+          totalSaved += (res.addedCount || 0) + (res.updatedCount || 0) + (res.alternativeCount || 0);
+          setSaveProgress({ done: Math.min(total, i + chunk.length), total, saved: totalSaved });
+        } catch (err: any) {
+          setInterruptedBatchStart(i);
+          setSaveFeedback({
+            type: 'error',
+            text: `Interrompido no lote ${i + 1}–${Math.min(total, i + chunk.length)}: ${err?.message || 'Erro de rede'}. ${totalSaved} guardadas. Clique em Retomar para continuar.`
+          });
+          onSourcesSaved();
+          return;
+        }
+      }
+
+      setInterruptedBatchStart(null);
+      setSaveFeedback({
+        type: 'success',
+        text: `✓ Concluído: ${total} episódio(s) processado(s) e ${totalSaved} fonte(s) guardada(s)/atualizada(s) na Temporada ${selectedSeasonNum}.`
+      });
       onSourcesSaved();
-    } catch (err: any) {
-      setShowConfirmModal(false);
-      setSaveFeedback({ type: 'error', text: err?.message || 'Erro ao guardar episódios.' });
+      refreshComparison(Number(selectedSeries.tmdbId));
     } finally {
       setSavingBatch(false);
     }
@@ -546,12 +646,25 @@ export const EpisodeGenerator: React.FC<EpisodeGeneratorProps> = ({
               </button>
             </div>
 
-            {/* Quick Select from Local Catalog */}
+            {/* Quick Select from Local Catalog (NO arbitrary 8-series truncation) */}
             {catalogSeries.length > 0 && (
               <div className="space-y-1.5">
-                <span className="text-[11px] font-semibold text-zinc-500">Séries no catálogo local:</span>
-                <div className="flex flex-wrap gap-1.5">
-                  {catalogSeries.slice(0, 8).map(cs => {
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-semibold text-zinc-500">
+                    Séries no catálogo local ({catalogSeries.length}):
+                  </span>
+                  {catalogSeries.length > 10 && (
+                    <button
+                      type="button"
+                      onClick={() => setShowAllLocalSeries(v => !v)}
+                      className="text-[11px] font-bold text-[#E50914] hover:underline"
+                    >
+                      {showAllLocalSeries ? 'Recolher lista' : `Mostrar todas (${catalogSeries.length})`}
+                    </button>
+                  )}
+                </div>
+                <div className="flex flex-wrap gap-1.5 max-h-40 overflow-y-auto pr-1">
+                  {(showAllLocalSeries ? catalogSeries : catalogSeries.slice(0, 10)).map(cs => {
                     const isSelected = Number(selectedSeries?.tmdbId) === Number(cs.tmdbId);
                     return (
                       <button
@@ -652,13 +765,47 @@ export const EpisodeGenerator: React.FC<EpisodeGeneratorProps> = ({
                   </div>
                 </div>
 
+                {/* Comparison Stats Summary */}
+                {comparisonStats && (
+                  <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 bg-[#111114] border border-white/10 rounded-xl p-3 text-[11px] tabular-nums">
+                    <div>
+                      <span className="text-zinc-500 uppercase block text-[9px]">Temporadas</span>
+                      <strong className="text-white">{comparisonStats.officialSeasonsCount}</strong>
+                    </div>
+                    <div>
+                      <span className="text-zinc-500 uppercase block text-[9px]">Esperados</span>
+                      <strong className="text-zinc-200">{comparisonStats.expectedEpisodes}</strong>
+                    </div>
+                    <div>
+                      <span className="text-zinc-500 uppercase block text-[9px]">Encontrados</span>
+                      <strong className="text-blue-400">{comparisonStats.foundEpisodes}</strong>
+                    </div>
+                    <div>
+                      <span className="text-zinc-500 uppercase block text-[9px]">Com Link</span>
+                      <strong className="text-emerald-400">{comparisonStats.withLink}</strong>
+                    </div>
+                    <div>
+                      <span className="text-zinc-500 uppercase block text-[9px]">Sem Link</span>
+                      <strong className="text-amber-400">{comparisonStats.withoutLink}</strong>
+                    </div>
+                    <div>
+                      <span className="text-zinc-500 uppercase block text-[9px]">Valid / Erro</span>
+                      <strong>
+                        <span className="text-emerald-400">{comparisonStats.validatedCount}</span>
+                        {' / '}
+                        <span className="text-red-400">{comparisonStats.errorCount}</span>
+                      </strong>
+                    </div>
+                  </div>
+                )}
+
                 {/* Seasons List */}
                 <div className="space-y-2">
                   <span className="text-[11px] font-bold uppercase tracking-wider text-zinc-400 block">
-                    Selecionar Temporada
+                    Selecionar Temporada ({seasonsList.length})
                   </span>
                   {seasonsList.length > 0 ? (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 max-h-64 overflow-y-auto pr-1">
                       {seasonsList.map(season => {
                         const sNum = Number(season.seasonNumber);
                         const isActive = sNum === selectedSeasonNum;
@@ -668,7 +815,7 @@ export const EpisodeGenerator: React.FC<EpisodeGeneratorProps> = ({
                           src =>
                             Number(src.contentId) === Number(selectedSeries.tmdbId) &&
                             (src.contentType === 'tv' || src.contentType === 'series') &&
-                            Number(src.seasonNumber || 1) === sNum
+                            Number(src.seasonNumber ?? 1) === sNum
                         ).length;
 
                         return (
@@ -684,7 +831,7 @@ export const EpisodeGenerator: React.FC<EpisodeGeneratorProps> = ({
                           >
                             <div className="flex items-center justify-between gap-2">
                               <span className="text-xs font-bold truncate">
-                                {sNum === 0 ? 'Especiais' : `Temporada ${sNum}`}
+                                {sNum === 0 ? 'Especiais (T0)' : `Temporada ${sNum}`}
                               </span>
                               {hasSavedTemplate && (
                                 <Bookmark className="w-3 h-3 text-emerald-400 shrink-0" title="Modelo de URL salvo" />
@@ -769,9 +916,8 @@ export const EpisodeGenerator: React.FC<EpisodeGeneratorProps> = ({
                 <input
                   type="number"
                   min={1}
-                  max={500}
                   value={episodeCount}
-                  onChange={(e) => setEpisodeCount(Math.max(1, Math.min(500, parseInt(e.target.value, 10) || 1)))}
+                  onChange={(e) => setEpisodeCount(Math.max(1, parseInt(e.target.value, 10) || 1))}
                   className="w-full bg-black border border-white/15 focus:border-[#E50914] rounded-xl px-3 py-2 text-sm font-mono text-white outline-none tabular-nums"
                 />
               </div>
@@ -802,6 +948,16 @@ export const EpisodeGenerator: React.FC<EpisodeGeneratorProps> = ({
                 <div>
                   <p className="font-bold">Geração automática bloqueada</p>
                   <p className="mt-0.5">{generatedResult.error}</p>
+                </div>
+              </div>
+            )}
+
+            {generatedResult.valid && generatedResult.notice && (
+              <div className="p-3 rounded-xl bg-emerald-950/30 border border-emerald-500/35 text-xs text-emerald-200 flex items-start gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                <div>
+                  <p className="font-bold">Deteção Inteligente Bem-Sucedida</p>
+                  <p className="mt-0.5">{generatedResult.notice}</p>
                 </div>
               </div>
             )}
@@ -846,26 +1002,84 @@ export const EpisodeGenerator: React.FC<EpisodeGeneratorProps> = ({
               </div>
 
               <div className="space-y-1">
-                <label className="text-[11px] font-bold text-zinc-400 uppercase">Idioma & Qualidade</label>
+                <label className="text-[11px] font-bold text-zinc-400 uppercase">Versão & Qualidade</label>
                 <div className="grid grid-cols-2 gap-1.5">
+                  <select
+                    value={versionType}
+                    onChange={(e) => setVersionType(e.target.value)}
+                    className="w-full bg-black border border-white/15 focus:border-[#E50914] rounded-xl px-2.5 py-2 text-xs text-white outline-none font-semibold"
+                  >
+                    {VERSION_TYPE_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    value={quality}
+                    onChange={(e) => setQuality(e.target.value)}
+                    className="w-full bg-black border border-white/15 focus:border-[#E50914] rounded-xl px-2 py-2 text-xs text-white outline-none font-semibold"
+                  >
+                    {SOURCE_QUALITY_OPTIONS.map((q) => (
+                      <option key={q} value={q}>
+                        {q === 'Automática' ? 'Auto' : q}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[11px] font-bold text-zinc-400 uppercase">Idioma</label>
+                <select
+                  value={isPresetAudioLanguage(audioLanguage) ? audioLanguage || 'Português' : 'Outro'}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setAudioLanguage(val === 'Outro' ? '' : val);
+                  }}
+                  className="w-full bg-black border border-white/15 focus:border-[#E50914] rounded-xl px-3 py-2 text-xs text-white outline-none font-semibold"
+                >
+                  {AUDIO_LANGUAGE_OPTIONS.map((lang) => (
+                    <option key={lang} value={lang}>
+                      {lang}
+                    </option>
+                  ))}
+                </select>
+                {!isPresetAudioLanguage(audioLanguage) && (
                   <input
                     type="text"
                     value={audioLanguage}
                     onChange={(e) => setAudioLanguage(e.target.value)}
-                    className="w-full bg-black border border-white/15 rounded-xl px-2.5 py-2 text-xs text-white outline-none"
-                    placeholder="Áudio"
+                    className="w-full bg-black border border-white/15 rounded-xl px-2.5 py-1.5 text-xs text-white outline-none mt-1"
+                    placeholder="Informe o idioma"
                   />
-                  <select
-                    value={quality}
-                    onChange={(e) => setQuality(e.target.value)}
-                    className="w-full bg-black border border-white/15 rounded-xl px-2 py-2 text-xs text-white outline-none"
-                  >
-                    <option value="1080p">1080p</option>
-                    <option value="4K">4K</option>
-                    <option value="720p">720p</option>
-                    <option value="Automática">Auto</option>
-                  </select>
-                </div>
+                )}
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[11px] font-bold text-zinc-400 uppercase">
+                  Legenda Externa (.srt / .vtt) — Opcional
+                </label>
+                <input
+                  type="url"
+                  value={subtitleUrl}
+                  onChange={(e) => setSubtitleUrl(e.target.value)}
+                  className="w-full bg-black border border-white/15 focus:border-[#E50914] rounded-xl px-3 py-2 text-xs text-white font-mono outline-none"
+                  placeholder="https://.../legenda.srt ou .vtt"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[11px] font-bold text-zinc-400 uppercase">
+                  Idioma da Legenda — Opcional
+                </label>
+                <input
+                  type="text"
+                  value={subtitleLanguage}
+                  onChange={(e) => setSubtitleLanguage(e.target.value)}
+                  className="w-full bg-black border border-white/15 focus:border-[#E50914] rounded-xl px-3 py-2 text-xs text-white outline-none"
+                  placeholder="Ex: Português, Inglês"
+                />
               </div>
             </div>
 
@@ -978,113 +1192,217 @@ export const EpisodeGenerator: React.FC<EpisodeGeneratorProps> = ({
               )}
             </div>
 
-            <div className="max-h-[460px] overflow-y-auto divide-y divide-white/5">
-              {generatedResult.valid && generatedResult.links.length > 0 ? (
-                generatedResult.links.map(item => {
-                  const epMeta = seasonEpisodesMeta[item.episodeNumber];
-                  const existingForEp = existingEpisodeSourcesMap[item.episodeNumber] || [];
-                  const hasConflict = existingForEp.length > 0;
+            {(() => {
+              const PREVIEW_PAGE_SIZE = 30;
+              const allLinks = generatedResult.valid ? generatedResult.links : [];
+              const totalPreviewPages = Math.max(1, Math.ceil(allLinks.length / PREVIEW_PAGE_SIZE));
+              const safePreviewPage = Math.min(previewPage, totalPreviewPages);
+              const visibleLinks = showAllPreview
+                ? allLinks
+                : allLinks.slice((safePreviewPage - 1) * PREVIEW_PAGE_SIZE, safePreviewPage * PREVIEW_PAGE_SIZE);
 
-                  return (
-                    <div key={item.episodeNumber} className="p-3.5 space-y-2 hover:bg-white/[0.02]">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div className="flex items-center gap-2 min-w-0">
-                          <span className="text-xs font-black font-mono text-white tabular-nums">
-                            Episódio {String(item.episodeNumber).padStart(2, '0')}
-                          </span>
-                          {epMeta?.title && (
-                            <span className="text-[11px] text-zinc-400 truncate max-w-[180px]" title={epMeta.title}>
-                              · {epMeta.title}
-                            </span>
-                          )}
-                          {hasConflict && (
-                            <span className="text-[10px] font-bold text-amber-400">
-                              · Já tem {existingForEp.length} fonte(s)
-                            </span>
-                          )}
-                        </div>
-                        {renderValidationBadge(item.episodeNumber)}
-                      </div>
-
-                      <div className="flex items-center gap-2">
-                        <code className="flex-1 bg-black border border-white/10 rounded-lg px-2.5 py-1.5 text-[11px] font-mono text-emerald-400 truncate">
-                          {item.url}
-                        </code>
+              return (
+                <>
+                  {allLinks.length > PREVIEW_PAGE_SIZE && (
+                    <div className="px-4 py-2 bg-black/50 border-b border-white/10 flex flex-wrap items-center justify-between gap-2 text-[11px] tabular-nums">
+                      <span className="text-zinc-400">
+                        {showAllPreview
+                          ? `Todos os ${allLinks.length} links`
+                          : `Página ${safePreviewPage} de ${totalPreviewPages} (${allLinks.length} links)`}
+                      </span>
+                      <div className="flex items-center gap-1.5">
+                        {!showAllPreview && (
+                          <>
+                            <button
+                              type="button"
+                              disabled={safePreviewPage <= 1}
+                              onClick={() => setPreviewPage(p => Math.max(1, p - 1))}
+                              className="px-2 py-1 rounded bg-white/5 hover:bg-white/10 disabled:opacity-40"
+                            >
+                              Anterior
+                            </button>
+                            <button
+                              type="button"
+                              disabled={safePreviewPage >= totalPreviewPages}
+                              onClick={() => setPreviewPage(p => Math.min(totalPreviewPages, p + 1))}
+                              className="px-2 py-1 rounded bg-white/5 hover:bg-white/10 disabled:opacity-40"
+                            >
+                              Seguinte
+                            </button>
+                          </>
+                        )}
                         <button
                           type="button"
-                          onClick={() => copyText(item.url, `ep-${item.episodeNumber}`)}
-                          className="p-1.5 bg-white/5 hover:bg-white/15 border border-white/10 rounded-lg text-zinc-300 hover:text-white shrink-0"
-                          title="Copiar link"
+                          onClick={() => setShowAllPreview(v => !v)}
+                          className="px-2 py-1 rounded bg-white/10 hover:bg-white/15 text-zinc-200 font-bold"
                         >
-                          {copiedKey === `ep-${item.episodeNumber}` ? (
-                            <Check className="w-3.5 h-3.5 text-emerald-400" />
-                          ) : (
-                            <Copy className="w-3.5 h-3.5" />
-                          )}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleTestSingleEpisode(item.episodeNumber, item.url)}
-                          disabled={validations[item.episodeNumber]?.status === 'testing'}
-                          className="p-1.5 bg-white/5 hover:bg-white/15 border border-white/10 rounded-lg text-zinc-300 hover:text-white shrink-0"
-                          title="Testar este link"
-                        >
-                          <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setPlayTestEpisode({
-                              episodeNumber: item.episodeNumber,
-                              url: item.url,
-                              title: epMeta?.title
-                            })
-                          }
-                          className="p-1.5 bg-[#E50914]/15 hover:bg-[#E50914] border border-[#E50914]/30 rounded-lg text-[#E50914] hover:text-white shrink-0"
-                          title="Testar no Player"
-                        >
-                          <Play className="w-3.5 h-3.5 fill-current" />
+                          {showAllPreview ? `Paginar (${PREVIEW_PAGE_SIZE})` : 'Ver Todos'}
                         </button>
                       </div>
-
-                      {validations[item.episodeNumber]?.message && (
-                        <p className="text-[10px] text-zinc-400 leading-snug">
-                          {validations[item.episodeNumber].message}
-                        </p>
-                      )}
                     </div>
-                  );
-                })
-              ) : (
-                <div className="p-10 text-center space-y-2 text-zinc-500">
-                  <Zap className="w-8 h-8 mx-auto opacity-30" />
-                  <p className="text-xs font-semibold">Pré-visualização vazia</p>
-                  <p className="text-[11px] max-w-xs mx-auto">
-                    Cole um endereço válido terminado com o número do episódio (ex:{' '}
-                    <code className="text-zinc-300">{MGEB_PREFIX}https://.../1</code>).
-                  </p>
-                </div>
-              )}
-            </div>
+                  )}
+
+                  <div className="max-h-[460px] overflow-y-auto divide-y divide-white/5">
+                    {visibleLinks.length > 0 ? (
+                      visibleLinks.map(item => {
+                        const epMeta = seasonEpisodesMeta[item.episodeNumber];
+                        const existingForEp = existingEpisodeSourcesMap[item.episodeNumber] || [];
+                        const hasConflict = existingForEp.length > 0;
+
+                        return (
+                          <div key={item.episodeNumber} className="p-3.5 space-y-2 hover:bg-white/[0.02]">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div className="flex items-center gap-2 min-w-0">
+                                <span className="text-xs font-black font-mono text-white tabular-nums">
+                                  Episódio {String(item.episodeNumber).padStart(2, '0')}
+                                </span>
+                                {epMeta?.title && (
+                                  <span className="text-[11px] text-zinc-400 truncate max-w-[180px]" title={epMeta.title}>
+                                    · {epMeta.title}
+                                  </span>
+                                )}
+                                {hasConflict && (
+                                  <span className="text-[10px] font-bold text-amber-400">
+                                    · Já tem {existingForEp.length} fonte(s)
+                                  </span>
+                                )}
+                              </div>
+                              {renderValidationBadge(item.episodeNumber)}
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                              <code className="flex-1 bg-black border border-white/10 rounded-lg px-2.5 py-1.5 text-[11px] font-mono text-emerald-400 truncate">
+                                {item.url}
+                              </code>
+                              <button
+                                type="button"
+                                onClick={() => copyText(item.url, `ep-${item.episodeNumber}`)}
+                                className="p-1.5 bg-white/5 hover:bg-white/15 border border-white/10 rounded-lg text-zinc-300 hover:text-white shrink-0"
+                                title="Copiar link"
+                              >
+                                {copiedKey === `ep-${item.episodeNumber}` ? (
+                                  <Check className="w-3.5 h-3.5 text-emerald-400" />
+                                ) : (
+                                  <Copy className="w-3.5 h-3.5" />
+                                )}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleTestSingleEpisode(item.episodeNumber, item.url)}
+                                disabled={validations[item.episodeNumber]?.status === 'testing'}
+                                className="p-1.5 bg-white/5 hover:bg-white/15 border border-white/10 rounded-lg text-zinc-300 hover:text-white shrink-0"
+                                title="Testar este link"
+                              >
+                                <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setPlayTestDiag({ status: 'playing', message: 'A inicializar reprodução do episódio...' });
+                                  setPlayTestEpisode({
+                                    episodeNumber: item.episodeNumber,
+                                    url: item.url,
+                                    title: epMeta?.title
+                                  });
+                                }}
+                                className="p-1.5 bg-[#E50914]/15 hover:bg-[#E50914] border border-[#E50914]/30 rounded-lg text-[#E50914] hover:text-white shrink-0"
+                                title="Testar no Player"
+                              >
+                                <Play className="w-3.5 h-3.5 fill-current" />
+                              </button>
+                            </div>
+
+                            {validations[item.episodeNumber]?.message && (
+                              <p className="text-[10px] text-zinc-400 leading-snug">
+                                {validations[item.episodeNumber].message}
+                              </p>
+                            )}
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <div className="p-10 text-center space-y-2 text-zinc-500">
+                        <Zap className="w-8 h-8 mx-auto opacity-30" />
+                        <p className="text-xs font-semibold">Pré-visualização vazia</p>
+                        <p className="text-[11px] max-w-xs mx-auto">
+                          Cole um endereço válido terminado com o número do episódio (ex:{' '}
+                          <code className="text-zinc-300">{MGEB_PREFIX}https://.../1</code>).
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                </>
+              );
+            })()}
           </div>
         </div>
       </div>
 
+      {/* Async Chunked Save / Test Progress Bar */}
+      {(savingBatch || testingBatch) && (
+        <div className="p-4 rounded-xl bg-[#111114] border border-white/15 space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-bold">
+            <span className="text-white flex items-center gap-2">
+              <RefreshCw className="w-3.5 h-3.5 animate-spin text-[#E50914]" />
+              {savingBatch && saveProgress
+                ? `A guardar episódios em lotes (${saveProgress.done}/${saveProgress.total} · ${saveProgress.saved} guardados)...`
+                : testBatchProgress
+                  ? `A validar links em lotes (${testBatchProgress.done}/${testBatchProgress.total})...`
+                  : 'A processar operação...'}
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                cancelBatchRef.current = true;
+              }}
+              className="px-3 py-1 rounded-lg bg-red-500/20 hover:bg-red-500/30 border border-red-500/40 text-red-300 text-[11px] font-bold"
+            >
+              Cancelar Operação
+            </button>
+          </div>
+          <div className="w-full h-2 bg-white/10 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-[#E50914] transition-all duration-200"
+              style={{
+                width: `${
+                  savingBatch && saveProgress
+                    ? Math.round((saveProgress.done / Math.max(1, saveProgress.total)) * 100)
+                    : testBatchProgress
+                      ? Math.round((testBatchProgress.done / Math.max(1, testBatchProgress.total)) * 100)
+                      : 0
+                }%`
+              }}
+            />
+          </div>
+        </div>
+      )}
+
       {/* Feedback Banner */}
       {saveFeedback && (
         <div
-          className={`p-4 rounded-xl border text-xs font-bold flex items-center gap-2.5 ${
+          className={`p-4 rounded-xl border text-xs font-bold flex flex-wrap items-center justify-between gap-2.5 ${
             saveFeedback.type === 'success'
               ? 'bg-emerald-950/30 border-emerald-500/30 text-emerald-300'
               : 'bg-red-950/30 border-red-500/30 text-red-300'
           }`}
         >
-          {saveFeedback.type === 'success' ? (
-            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-          ) : (
-            <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+          <div className="flex items-center gap-2">
+            {saveFeedback.type === 'success' ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            ) : (
+              <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+            )}
+            <span>{saveFeedback.text}</span>
+          </div>
+          {interruptedBatchStart !== null && !savingBatch && (
+            <button
+              type="button"
+              onClick={() => handleConfirmSaveBatch(interruptedBatchStart)}
+              className="px-3.5 py-1.5 rounded-lg bg-[#E50914] hover:bg-red-700 text-white text-xs font-bold"
+            >
+              Retomar Operação
+            </button>
           )}
-          <span>{saveFeedback.text}</span>
         </div>
       )}
 
@@ -1138,7 +1456,7 @@ export const EpisodeGenerator: React.FC<EpisodeGeneratorProps> = ({
             setConflictMode(conflictingEpisodes.length > 0 ? 'skip' : 'skip');
             setShowConfirmModal(true);
           }}
-          disabled={!selectedSeries?.tmdbId || !generatedResult.valid || generatedResult.links.length === 0}
+          disabled={savingBatch || !selectedSeries?.tmdbId || !generatedResult.valid || generatedResult.links.length === 0}
           className="px-6 py-2.5 bg-[#E50914] hover:bg-[#b80710] disabled:opacity-40 text-white text-xs font-black uppercase tracking-wider rounded-xl flex items-center gap-2 shadow-lg shadow-[#E50914]/25 cursor-pointer"
         >
           <Save className="w-4 h-4" />
@@ -1242,7 +1560,7 @@ export const EpisodeGenerator: React.FC<EpisodeGeneratorProps> = ({
               </button>
               <button
                 type="button"
-                onClick={handleConfirmSaveBatch}
+                onClick={() => handleConfirmSaveBatch(0)}
                 disabled={savingBatch || !existsInCatalog}
                 className="px-5 py-2 bg-[#E50914] hover:bg-[#b80710] disabled:opacity-40 text-white text-xs font-black uppercase rounded-xl flex items-center gap-2"
               >
@@ -1258,13 +1576,33 @@ export const EpisodeGenerator: React.FC<EpisodeGeneratorProps> = ({
       {playTestEpisode && (
         <div className="fixed inset-0 z-[125] flex items-center justify-center p-4 bg-black/90 backdrop-blur-sm">
           <div className="w-full max-w-3xl bg-[#111114] border border-white/15 rounded-2xl overflow-hidden shadow-2xl">
-            <div className="p-4 border-b border-white/10 flex items-center justify-between">
+            <div className="p-4 border-b border-white/10 flex items-center justify-between gap-3">
               <div className="min-w-0">
-                <h4 className="text-sm font-bold text-white truncate">
-                  Teste — {selectedSeries?.title} · T{selectedSeasonNum} E{playTestEpisode.episodeNumber}
-                  {playTestEpisode.title ? ` (${playTestEpisode.title})` : ''}
-                </h4>
-                <p className="text-[11px] font-mono text-zinc-400 truncate">{playTestEpisode.url}</p>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h4 className="text-sm font-bold text-white truncate">
+                    Teste — {selectedSeries?.title} · T{selectedSeasonNum} E{playTestEpisode.episodeNumber}
+                    {playTestEpisode.title ? ` (${playTestEpisode.title})` : ''}
+                  </h4>
+                  <span
+                    className={`px-2 py-0.5 rounded text-[10px] font-black uppercase ${
+                      playTestDiag.status === 'confirmed'
+                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                        : playTestDiag.status === 'format_error' || playTestDiag.status === 'connection_error'
+                          ? 'bg-red-500/20 text-red-300 border border-[#E50914]/40'
+                          : 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+                    }`}
+                  >
+                    {playTestDiag.status === 'confirmed'
+                      ? 'REPRODUÇÃO CONFIRMADA'
+                      : playTestDiag.status === 'format_error'
+                        ? 'ERRO DE FORMATO'
+                        : playTestDiag.status === 'connection_error'
+                          ? 'ERRO DE CONEXÃO'
+                          : 'TESTE EM ANDAMENTO'}
+                  </span>
+                </div>
+                <p className="text-[11px] font-mono text-zinc-400 truncate mt-0.5">{playTestEpisode.url}</p>
+                <p className="text-[11px] text-zinc-300 mt-0.5">{playTestDiag.message}</p>
               </div>
               <button type="button" onClick={() => setPlayTestEpisode(null)} className="text-zinc-400 hover:text-white p-1">
                 <X className="w-5 h-5" />
@@ -1278,15 +1616,36 @@ export const EpisodeGenerator: React.FC<EpisodeGeneratorProps> = ({
                       id: `ep-preview-${playTestEpisode.episodeNumber}`,
                       url: playTestEpisode.url,
                       originalUrl: playTestEpisode.url,
-                      format: format as any,
+                      format: (format || classifySourceUrl(playTestEpisode.url).suggestedFormat) as any,
+                      sourceKind: classifySourceUrl(playTestEpisode.url).sourceKind,
                       serverName,
-                      audioLanguage,
+                      audioLanguage: audioLanguage.trim() || 'Português',
+                      versionType,
+                      subtitleUrl: subtitleUrl.trim() || undefined,
+                      subtitleLanguage: subtitleLanguage.trim() || undefined,
                       quality,
                       isPrimary: true
                     }
                   ]}
                   title={`${selectedSeries?.title || 'Série'} • S${String(selectedSeasonNum).padStart(2, '0')}E${String(playTestEpisode.episodeNumber).padStart(2, '0')}`}
                   autoplay={true}
+                  onPlaybackEvent={(status, message) => {
+                    if (status === 'STARTED') {
+                      setPlayTestDiag({
+                        status: 'confirmed',
+                        message: 'Stream do episódio inicializado no player.'
+                      });
+                    } else {
+                      const lower = (message || '').toLowerCase();
+                      setPlayTestDiag({
+                        status:
+                          lower.includes('formato') || lower.includes('descodificar') || lower.includes('html')
+                            ? 'format_error'
+                            : 'connection_error',
+                        message: message || 'Erro ao reproduzir episódio.'
+                      });
+                    }
+                  }}
                 />
               </ErrorBoundary>
             </div>

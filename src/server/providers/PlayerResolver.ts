@@ -36,6 +36,9 @@ export const playerResolver = {
             label: `${s.serverName || 'Servidor'} (${s.quality || '1080p'})`,
             quality: s.quality || '1080p',
             audioLanguage: s.audioLanguage || 'Português',
+            subtitleLanguage: s.subtitleLanguage,
+            versionType: s.versionType,
+            subtitleUrl: s.subtitleUrl,
             isPrimary: s.isPrimary ?? false,
             status: s.status || 'registered',
             diagnostics: s.diagnostics
@@ -106,6 +109,9 @@ export const playerResolver = {
             label: `${s.serverName || 'Servidor'} (${s.quality || '1080p'})`,
             quality: s.quality || '1080p',
             audioLanguage: s.audioLanguage || 'Português',
+            subtitleLanguage: s.subtitleLanguage,
+            versionType: s.versionType,
+            subtitleUrl: s.subtitleUrl,
             isPrimary: s.isPrimary ?? false,
             status: s.status || 'registered',
             diagnostics: s.diagnostics

@@ -15,6 +15,11 @@ import {
   MediaSourceSummary,
   MediaDiagnosticSummary,
   Season,
+  Episode,
+  SeasonComparisonStats,
+  SeriesComparisonReport,
+  BackupRecord,
+  BackupImportJob,
   PlanTier,
   PlanConfig,
   DeveloperApp,
@@ -24,7 +29,12 @@ import {
   ApiRequestMetric,
   PlaybackEventLog,
   SeasonSourceTemplate,
-  BatchEpisodeSourcesResult
+  BatchEpisodeSourcesResult,
+  WatchProgress,
+  LinkImportHistoryItem,
+  SeasonDiscoveryJob,
+  AdCampaign,
+  ConnectedSiteRecord
 } from '../types.js';
 import { adminDb } from './firebaseAdmin.js';
 import {
@@ -36,6 +46,11 @@ import {
   normalizeDomainEntry
 } from './authService.js';
 import { classifySourceUrl } from '../lib/sourceClassification.js';
+import {
+  normalizeVersionType,
+  isSourceDublado,
+  isSourceLegendado
+} from '../lib/sourceMetadata.js';
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
 const STORE_FILE = path.join(DATA_DIR, 'playfilme_store.json');
@@ -45,8 +60,15 @@ export interface StoreUser extends User {
   passwordHash?: string;
   passwordSalt?: string;
   authProvider?: 'password' | 'google' | 'firebase';
-  status?: 'active' | 'suspended';
+  status?: 'active' | 'suspended' | 'blocked' | 'banned';
   lastLogin?: string;
+}
+
+export interface BackupSettingsConfig {
+  autoBackupEnabled: boolean;
+  autoBackupIntervalHours: number;
+  lastBackupAt: string | null;
+  lastImportAt: string | null;
 }
 
 interface StoreData {
@@ -59,6 +81,7 @@ interface StoreData {
   videoSources?: VideoSource[];
   auditLogs?: any[];
   importHistory?: ImportHistoryItem[];
+  linkImportHistory?: LinkImportHistoryItem[];
   massImportReports?: MassImportReport[];
   massImportState?: ImportStatus | null;
   recoveryState?: any;
@@ -71,7 +94,14 @@ interface StoreData {
   apiMonitoring?: ApiRequestMetric[];
   playbackEvents?: PlaybackEventLog[];
   seasonSourceTemplates?: Record<string, SeasonSourceTemplate>;
+  watchProgress?: WatchProgress[];
   backups?: any[];
+  backupRecords?: BackupRecord[];
+  backupImportJobs?: BackupImportJob[];
+  backupConfig?: BackupSettingsConfig;
+  seasonDiscoveryJobs?: SeasonDiscoveryJob[];
+  adCampaigns?: AdCampaign[];
+  connectedSites?: ConnectedSiteRecord[];
 }
 
 const DEFAULT_PLANS_CONFIG: Record<PlanTier, PlanConfig> = {
@@ -184,6 +214,7 @@ class Database {
       minCatalogThreshold: 5
     },
     importHistory: [],
+    linkImportHistory: [],
     massImportReports: [],
     massImportState: null,
     recoveryState: { status: 'IDLE', lastSnapshot: null },
@@ -195,7 +226,16 @@ class Database {
     apiGlobalSettings: { ...DEFAULT_API_GLOBAL_SETTINGS },
     apiMonitoring: [],
     playbackEvents: [],
-    seasonSourceTemplates: {}
+    seasonSourceTemplates: {},
+    watchProgress: [],
+    backupRecords: [],
+    backupImportJobs: [],
+    backupConfig: {
+      autoBackupEnabled: false,
+      autoBackupIntervalHours: 24,
+      lastBackupAt: null,
+      lastImportAt: null
+    }
   };
 
   private mediaIndexByTmdbAndType = new Map<string, MediaItem>();
@@ -203,6 +243,13 @@ class Database {
 
   constructor() {
     this.init();
+  }
+
+  private parseSeasonNum(val: any, fallback = 1): number {
+    if (val === undefined || val === null || val === '') return fallback;
+    const n = Number(val);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(0, Math.floor(n));
   }
 
   private rebuildFastIndices() {
@@ -228,6 +275,7 @@ class Database {
       videoSources: parsed.videoSources || [],
       auditLogs: parsed.auditLogs || [],
       importHistory: parsed.importHistory || [],
+      linkImportHistory: parsed.linkImportHistory || [],
       massImportReports: parsed.massImportReports || [],
       massImportState: parsed.massImportState || null,
       recoveryState: parsed.recoveryState || { status: 'IDLE', lastSnapshot: null },
@@ -245,7 +293,18 @@ class Database {
       apiMonitoring: parsed.apiMonitoring || [],
       playbackEvents: parsed.playbackEvents || [],
       seasonSourceTemplates: parsed.seasonSourceTemplates || {},
-      backups: parsed.backups || []
+      watchProgress: parsed.watchProgress || [],
+      backups: parsed.backups || [],
+      backupRecords: parsed.backupRecords || [],
+      backupImportJobs: parsed.backupImportJobs || [],
+      backupConfig: {
+        autoBackupEnabled: Boolean(parsed.backupConfig?.autoBackupEnabled),
+        autoBackupIntervalHours: Number(parsed.backupConfig?.autoBackupIntervalHours || 24),
+        lastBackupAt: parsed.backupConfig?.lastBackupAt || null,
+        lastImportAt: parsed.backupConfig?.lastImportAt || null
+      },
+      adCampaigns: parsed.adCampaigns || [],
+      connectedSites: parsed.connectedSites || []
     };
     this.rebuildFastIndices();
   }
@@ -405,8 +464,8 @@ class Database {
         originalTitle: 'Fight Club',
         type: 'movie',
         overview: 'Um homem desiludido que sofre de insônia encontra um vendedor de sabão carismático e forma um clube de lutas underground.',
-        posterPath: 'https://image.tmdb.org/t/p/w500/pB8BM2pdSp6B6Ih7QZ4DrQ3PmJK.jpg',
-        backdropPath: 'https://image.tmdb.org/t/p/original/hZk2L1A33c94P39423.jpg',
+        posterPath: 'https://image.tmdb.org/t/p/w500/pB8BM7pdSp6B6Ih7QZ4DrQ3PmJK.jpg',
+        backdropPath: 'https://image.tmdb.org/t/p/w1280/c6OLXfKAk5BKeR6broC8pYiCquX.jpg',
         voteAverage: 8.4,
         releaseYear: 1999,
         genres: ['Drama', 'Thriller'],
@@ -421,8 +480,8 @@ class Database {
         originalTitle: 'Game of Thrones',
         type: 'tv',
         overview: 'Em uma terra onde os verões duram décadas e os invernos uma vida inteira, os problemas estão apenas começando.',
-        posterPath: 'https://image.tmdb.org/t/p/w500/1XS1oqL89opfnb39393.jpg',
-        backdropPath: 'https://image.tmdb.org/t/p/original/su833839393.jpg',
+        posterPath: 'https://image.tmdb.org/t/p/w500/aqomTRKjNZkmNEeOZnEmWrFTmKU.jpg',
+        backdropPath: 'https://image.tmdb.org/t/p/w1280/zZqpAXxVSBtxV9qPBcscfXBcL2w.jpg',
         voteAverage: 8.5,
         releaseYear: 2011,
         numberOfSeasons: 8,
@@ -481,6 +540,94 @@ class Database {
     const t = (type || 'movie').toLowerCase().trim();
     if (t === 'tv' || t === 'series' || t === 'serie' || t === 'tv_series') return 'tv';
     return 'movie';
+  }
+
+  public normalizeCategories(cats?: string[] | null): Array<'anime' | 'dorama'> {
+    if (!Array.isArray(cats)) return [];
+    const out = new Set<'anime' | 'dorama'>();
+    for (const raw of cats) {
+      const c = String(raw || '').toLowerCase().trim();
+      if (c === 'anime' || c === 'animes') out.add('anime');
+      else if (c === 'dorama' || c === 'doramas' || c === 'kdrama' || c === 'k-drama' || c === 'jdrama' || c === 'j-drama' || c === 'cdrama' || c === 'c-drama') {
+        out.add('dorama');
+      }
+    }
+    return Array.from(out);
+  }
+
+  public hasCategory(item: MediaItem, category: 'anime' | 'dorama'): boolean {
+    if (Array.isArray(item.categories)) {
+      const explicit = this.normalizeCategories(item.categories);
+      if (explicit.includes(category)) return true;
+      if (explicit.length > 0 || item.importSource === 'smart_importer') return false;
+    }
+
+    const genresLower = (item.genres || []).map(g => this.normalizeText(g));
+    const isAnimation = genresLower.some(g => g.includes('animacao') || g.includes('animation') || g.includes('anime'));
+    const origLang = (item.originalLanguage || '').toLowerCase().trim();
+    const countries = (item.originCountry || []).map(c => c.toUpperCase().trim());
+
+    if (category === 'anime') {
+      return isAnimation && (origLang === 'ja' || countries.includes('JP'));
+    }
+
+    if (category === 'dorama') {
+      if (isAnimation) return false;
+      const isEastAsian =
+        countries.some(c => ['KR', 'JP', 'CN', 'TW', 'TH'].includes(c)) ||
+        ['ko', 'ja', 'zh', 'th'].includes(origLang);
+      const isDramaRomance = genresLower.some(
+        g => g.includes('drama') || g.includes('romance') || g.includes('soap') || g.includes('melodrama')
+      );
+      return isEastAsian && isDramaRomance;
+    }
+
+    return false;
+  }
+
+  public hasPlayableSource(item: MediaItem): boolean {
+    const sSummary = this.getMediaSourceSummary(item);
+    return (
+      sSummary.hasSource &&
+      sSummary.onlineCount + sSummary.registeredCount + sSummary.validatingCount + sSummary.unverifiableCount > 0
+    );
+  }
+
+  private matchesSeasonEpisode(item: MediaItem, season?: number, episode?: number): boolean {
+    if (season === undefined && episode === undefined) return true;
+    if (this.normalizeMediaType(item.type) !== 'tv') return false;
+    const seasons = Array.isArray(item.seasons) ? item.seasons : [];
+
+    if (season !== undefined) {
+      const matchedSeason = seasons.find(s => Number(s.seasonNumber) === season);
+      const hasSourceMatch = (this.data.playerSources || []).some(
+        p =>
+          Number(p.tmdbId) === Number(item.tmdbId) &&
+          this.normalizeMediaType(p.type) === 'tv' &&
+          Number(p.season) === season &&
+          (episode === undefined || Number(p.episode) === episode)
+      ) || (this.data.videoSources || []).some(
+        v =>
+          Number(v.contentId) === Number(item.tmdbId) &&
+          this.normalizeMediaType(v.contentType) === 'tv' &&
+          Number(v.seasonNumber) === season &&
+          (episode === undefined || Number(v.episodeNumber) === episode)
+      );
+      if (!matchedSeason && !hasSourceMatch) return false;
+      if (episode === undefined) return true;
+      if (hasSourceMatch) return true;
+      const eps = Array.isArray(matchedSeason?.episodes) ? matchedSeason!.episodes! : [];
+      if (eps.some(ep => Number(ep.episodeNumber) === episode)) return true;
+      if (Number(matchedSeason?.episodeCount || 0) >= episode && episode >= 1) return true;
+      return false;
+    }
+
+    // Only episode filter without season specified
+    return seasons.some(
+      s =>
+        (Array.isArray(s.episodes) && s.episodes.some(ep => Number(ep.episodeNumber) === episode)) ||
+        (Number(s.episodeCount || 0) >= Number(episode || 0))
+    );
   }
 
   private extractMediaYear(m: MediaItem): number {
@@ -666,9 +813,18 @@ class Database {
       case 'rating_low':
         return arr.sort((a, b) => (a.voteAverage || 0) - (b.voteAverage || 0));
       case 'popular':
+      case 'popularity':
         return arr.sort((a, b) => {
-          const scoreA = (a.popular ? 100000 : 0) + (a.voteCount || 0) + (a.voteAverage || 0) * 100;
-          const scoreB = (b.popular ? 100000 : 0) + (b.voteCount || 0) + (b.voteAverage || 0) * 100;
+          const scoreA =
+            Number(a.popularity || 0) * 10 +
+            (a.popular ? 500 : 0) +
+            (a.voteCount || 0) * 0.1 +
+            (a.voteAverage || 0) * 20;
+          const scoreB =
+            Number(b.popularity || 0) * 10 +
+            (b.popular ? 500 : 0) +
+            (b.voteCount || 0) * 0.1 +
+            (b.voteAverage || 0) * 20;
           return scoreB - scoreA;
         });
       case 'year':
@@ -691,9 +847,12 @@ class Database {
   // Media Operations (Public Catalog)
   public getCatalog(filter?: {
     type?: string;
+    category?: string;
     genre?: string;
     search?: string;
     section?: string;
+    season?: number;
+    episode?: number;
     yearFrom?: number;
     yearTo?: number;
     minRating?: number;
@@ -709,6 +868,15 @@ class Database {
     if (filter?.type && filter.type !== 'all') {
       const targetNorm = this.normalizeMediaType(filter.type);
       list = list.filter(m => this.normalizeMediaType(m.type) === targetNorm);
+    }
+
+    if (filter?.category && filter.category !== 'all') {
+      const cat = filter.category.toLowerCase().trim();
+      if (cat === 'anime' || cat === 'animes') {
+        list = list.filter(m => this.hasCategory(m, 'anime'));
+      } else if (cat === 'dorama' || cat === 'doramas') {
+        list = list.filter(m => this.hasCategory(m, 'dorama'));
+      }
     }
 
     if (filter?.status && filter.status !== 'all') {
@@ -733,6 +901,10 @@ class Database {
           (m.imdbId && m.imdbId.toLowerCase().includes(qRaw)) ||
           (m.tmdbId && String(m.tmdbId).includes(qRaw))
       );
+    }
+
+    if (filter?.season !== undefined || filter?.episode !== undefined) {
+      list = list.filter(m => this.matchesSeasonEpisode(m, filter.season, filter.episode));
     }
 
     if (filter?.section === 'featured') {
@@ -775,14 +947,90 @@ class Database {
     const limit = Math.max(1, filter?.limit || 20);
     const total = list.length;
     const totalPages = Math.ceil(total / limit) || 1;
-    const items = list.slice((page - 1) * limit, page * limit);
+    const items = list.slice((page - 1) * limit, page * limit).map(m => {
+      const counts = this.normalizeMediaType(m.type) === 'tv' ? this.countSeriesSeasonsAndEpisodes(m) : null;
+      return {
+        ...m,
+        categories: Array.isArray(m.categories) ? this.normalizeCategories(m.categories) : [
+          ...(this.hasCategory(m, 'anime') ? ['anime'] : []),
+          ...(this.hasCategory(m, 'dorama') ? ['dorama'] : [])
+        ],
+        seasonsCount: counts ? counts.seasonsCount : m.seasonsCount,
+        episodesCount: counts ? counts.episodesCount : m.episodesCount,
+        hasPlayableSource: this.hasPlayableSource(m),
+        inCatalog: true
+      };
+    });
 
     return { items, total, page, totalPages };
+  }
+
+  public getCatalogTrending(options?: { tab?: string; limit?: number }): MediaItem[] {
+    const tab = (options?.tab || 'trending').toLowerCase();
+    const limit = Math.max(1, Math.min(50, options?.limit || 18));
+    let list = this.data.media.filter(m => this.isMediaPublished(m));
+
+    if (tab === 'movies') {
+      list = list.filter(m => this.normalizeMediaType(m.type) === 'movie');
+    } else if (tab === 'series') {
+      list = list.filter(m => this.normalizeMediaType(m.type) === 'tv');
+    } else if (tab === 'animes') {
+      list = list.filter(m => this.hasCategory(m, 'anime'));
+    } else if (tab === 'doramas') {
+      list = list.filter(m => this.hasCategory(m, 'dorama'));
+    }
+
+    const enriched = list.map(m => {
+      const counts = this.normalizeMediaType(m.type) === 'tv' ? this.countSeriesSeasonsAndEpisodes(m) : null;
+      return {
+        ...m,
+        categories: Array.isArray(m.categories)
+          ? this.normalizeCategories(m.categories)
+          : [
+              ...(this.hasCategory(m, 'anime') ? ['anime'] : []),
+              ...(this.hasCategory(m, 'dorama') ? ['dorama'] : [])
+            ],
+        seasonsCount: counts ? counts.seasonsCount : m.seasonsCount,
+        episodesCount: counts ? counts.episodesCount : m.episodesCount,
+        hasPlayableSource: this.hasPlayableSource(m),
+        inCatalog: true
+      };
+    });
+
+    if (tab === 'recent') {
+      return enriched
+        .sort(
+          (a, b) =>
+            new Date(b.createdAt || b.updatedAt || 0).getTime() -
+            new Date(a.createdAt || a.updatedAt || 0).getTime()
+        )
+        .slice(0, limit);
+    }
+
+    return enriched
+      .sort((a, b) => {
+        const scoreA =
+          (a.hasPlayableSource ? 10000 : 0) +
+          (a.trending ? 3000 : 0) +
+          (a.popular ? 1500 : 0) +
+          Number(a.popularity || 0) * 10 +
+          Number(a.voteAverage || 0) * 20;
+        const scoreB =
+          (b.hasPlayableSource ? 10000 : 0) +
+          (b.trending ? 3000 : 0) +
+          (b.popular ? 1500 : 0) +
+          Number(b.popularity || 0) * 10 +
+          Number(b.voteAverage || 0) * 20;
+        if (scoreB !== scoreA) return scoreB - scoreA;
+        return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
+      })
+      .slice(0, limit);
   }
 
   // Dedicated Admin Catalog Query (never hides incomplete/unpublished items, attaches source + diagnostic summaries & DB integrity audit)
   public getAdminCatalog(filter?: {
     type?: string;
+    category?: string;
     genre?: string;
     search?: string;
     yearFrom?: number;
@@ -817,6 +1065,15 @@ class Database {
     if (filter?.type && filter.type !== 'all') {
       const targetNorm = this.normalizeMediaType(filter.type);
       list = list.filter(m => this.normalizeMediaType(m.type) === targetNorm);
+    }
+
+    if (filter?.category && filter.category !== 'all') {
+      const cat = filter.category.toLowerCase().trim();
+      if (cat === 'anime' || cat === 'animes') {
+        list = list.filter(m => this.hasCategory(m, 'anime'));
+      } else if (cat === 'dorama' || cat === 'doramas') {
+        list = list.filter(m => this.hasCategory(m, 'dorama'));
+      }
     }
 
     if (filter?.publishStatus === 'published') {
@@ -886,11 +1143,22 @@ class Database {
       const sourceSummary = this.getMediaSourceSummary(m);
       const diagnosticSummary = this.computeMediaDiagnostics(m, sourceSummary, dupMap);
       const counts = this.normalizeMediaType(m.type) === 'tv' ? this.countSeriesSeasonsAndEpisodes(m) : null;
+      const resolvedCategories = Array.isArray(m.categories)
+        ? this.normalizeCategories(m.categories)
+        : [
+            ...(this.hasCategory(m, 'anime') ? ['anime'] : []),
+            ...(this.hasCategory(m, 'dorama') ? ['dorama'] : [])
+          ];
       return {
         ...m,
+        categories: resolvedCategories,
         seasonsCount: counts ? counts.seasonsCount : m.seasonsCount,
         episodesCount: counts ? counts.episodesCount : m.episodesCount,
         published: m.published !== false && m.status !== 'DRAFT' && m.status !== 'INACTIVE',
+        hasPlayableSource:
+          sourceSummary.hasSource &&
+          sourceSummary.onlineCount + sourceSummary.registeredCount + sourceSummary.validatingCount + sourceSummary.unverifiableCount > 0,
+        inCatalog: true,
         sourceSummary,
         diagnosticSummary
       };
@@ -983,9 +1251,57 @@ class Database {
     return this.data.media.find(m => !m.deletedAt && Number(m.tmdbId) === cleanId && this.normalizeMediaType(m.type) === normType);
   }
 
+  private mergeEpisodesPreservingMetadata(existingEps?: Episode[], incomingEps?: Episode[]): Episode[] {
+    const prevList = Array.isArray(existingEps) ? existingEps : [];
+    const incList = Array.isArray(incomingEps) ? incomingEps : [];
+    if (incList.length === 0) return [...prevList].sort((a, b) => Number(a.episodeNumber) - Number(b.episodeNumber));
+    if (prevList.length === 0) return [...incList].sort((a, b) => Number(a.episodeNumber) - Number(b.episodeNumber));
+
+    const mergedMap = new Map<number, Episode>();
+    for (const prev of prevList) {
+      mergedMap.set(Number(prev.episodeNumber), { ...prev });
+    }
+    for (const inc of incList) {
+      const epNum = Number(inc.episodeNumber);
+      const prev = mergedMap.get(epNum);
+      if (!prev) {
+        mergedMap.set(epNum, { ...inc });
+      } else {
+        const isGenericPrev = !prev.title || /^epis[oó]dio\s+\d+$/i.test(prev.title.trim());
+        const resolvedTitle =
+          !inc.title
+            ? prev.title
+            : isGenericPrev || (prev.title && inc.title.trim() !== prev.title.trim() && !/^epis[oó]dio\s+\d+$/i.test(inc.title.trim()))
+              ? inc.title
+              : prev.title;
+        mergedMap.set(epNum, {
+          ...prev,
+          ...inc,
+          id: prev.id || inc.id,
+          tmdbId: inc.tmdbId || prev.tmdbId,
+          seasonNumber: this.parseSeasonNum(inc.seasonNumber, this.parseSeasonNum(prev.seasonNumber, 1)),
+          episodeNumber: epNum,
+          title: resolvedTitle || prev.title || `Episódio ${epNum}`,
+          overview: inc.overview || prev.overview || '',
+          stillPath: inc.stillPath || prev.stillPath,
+          duration: inc.duration || prev.duration,
+          airDate: inc.airDate || prev.airDate,
+          voteAverage: inc.voteAverage !== undefined ? inc.voteAverage : prev.voteAverage,
+          extraMetadata:
+            prev.extraMetadata || inc.extraMetadata
+              ? { ...(prev.extraMetadata || {}), ...(inc.extraMetadata || {}) }
+              : undefined
+        });
+      }
+    }
+    return Array.from(mergedMap.values()).sort((a, b) => Number(a.episodeNumber) - Number(b.episodeNumber));
+  }
+
   private mergeSeasonsPreservingEpisodes(existingSeasons?: Season[], incomingSeasons?: Season[]): Season[] | undefined {
     if (!incomingSeasons || incomingSeasons.length === 0) return existingSeasons;
-    if (!existingSeasons || existingSeasons.length === 0) return incomingSeasons;
+    if (!existingSeasons || existingSeasons.length === 0) {
+      return [...incomingSeasons].sort((a, b) => Number(a.seasonNumber) - Number(b.seasonNumber));
+    }
 
     const existingMap = new Map<number, Season>();
     for (const s of existingSeasons) {
@@ -993,24 +1309,23 @@ class Database {
     }
 
     const merged: Season[] = incomingSeasons.map(inc => {
-      const prev = existingMap.get(Number(inc.seasonNumber));
+      const sNum = Number(inc.seasonNumber);
+      const prev = existingMap.get(sNum);
       if (!prev) return inc;
-      const preservedEpisodes =
-        Array.isArray(inc.episodes) && inc.episodes.length > 0
-          ? inc.episodes
-          : Array.isArray(prev.episodes)
-          ? prev.episodes
-          : [];
+      const mergedEpisodes = this.mergeEpisodesPreservingMetadata(prev.episodes, inc.episodes);
       return {
         ...prev,
         ...inc,
         id: prev.id || inc.id,
-        episodeCount: Math.max(Number(inc.episodeCount || 0), Number(prev.episodeCount || 0), preservedEpisodes.length),
-        episodes: preservedEpisodes
+        seasonNumber: sNum,
+        name: inc.name || prev.name || (sNum === 0 ? 'Especiais' : `Temporada ${sNum}`),
+        overview: inc.overview || prev.overview,
+        posterPath: inc.posterPath || prev.posterPath,
+        episodeCount: Math.max(Number(inc.episodeCount || 0), Number(prev.episodeCount || 0), mergedEpisodes.length),
+        episodes: mergedEpisodes
       };
     });
 
-    // Retain any custom local season not present in incoming
     for (const prev of existingSeasons) {
       if (!merged.some(m => Number(m.seasonNumber) === Number(prev.seasonNumber))) {
         merged.push(prev);
@@ -1066,18 +1381,18 @@ class Database {
       if (filter?.status && s.status !== filter.status) return false;
       if (filter?.type && s.type !== filter.type) return false;
 
-      if (filter?.tmdbId && s.tmdbId === filter.tmdbId) {
-        if (s.type === 'tv') {
-          if (filter.season !== undefined && s.season !== filter.season) return false;
-          if (filter.episode !== undefined && s.episode !== filter.episode) return false;
+      if (filter?.tmdbId && Number(s.tmdbId) === Number(filter.tmdbId)) {
+        if (this.normalizeContentType(s.type) === 'tv') {
+          if (filter.season !== undefined && Number(s.season) !== Number(filter.season)) return false;
+          if (filter.episode !== undefined && Number(s.episode) !== Number(filter.episode)) return false;
         }
         return true;
       }
 
       if (filter?.imdbId && s.imdbId === filter.imdbId) {
-        if (s.type === 'tv') {
-          if (filter.season !== undefined && s.season !== filter.season) return false;
-          if (filter.episode !== undefined && s.episode !== filter.episode) return false;
+        if (this.normalizeContentType(s.type) === 'tv') {
+          if (filter.season !== undefined && Number(s.season) !== Number(filter.season)) return false;
+          if (filter.episode !== undefined && Number(s.episode) !== Number(filter.episode)) return false;
         }
         return true;
       }
@@ -1200,23 +1515,59 @@ class Database {
     });
   }
 
+  private firestoreBackoffUntil = 0;
+
+  private sanitizeForFirestore<T>(value: T): T {
+    if (value === null || value === undefined || typeof value !== 'object') {
+      return value;
+    }
+    if (Array.isArray(value)) {
+      return value
+        .filter(item => item !== undefined)
+        .map(item => this.sanitizeForFirestore(item)) as unknown as T;
+    }
+    const clean: Record<string, any> = {};
+    for (const [k, v] of Object.entries(value as Record<string, any>)) {
+      if (v !== undefined) {
+        clean[k] = this.sanitizeForFirestore(v);
+      }
+    }
+    return clean as T;
+  }
+
+  private mirrorFirestoreAsync(label: string, task: () => Promise<any>) {
+    if (Date.now() < this.firestoreBackoffUntil) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeoutSentinel = new Promise<{ timedOut: true }>(resolve => {
+      timer = setTimeout(() => resolve({ timedOut: true }), 2000);
+    });
+    Promise.race([
+      Promise.resolve()
+        .then(() => task())
+        .then(res => ({ timedOut: false as const, res })),
+      timeoutSentinel
+    ])
+      .then(outcome => {
+        if (timer) clearTimeout(timer);
+        if (outcome && outcome.timedOut) {
+          this.firestoreBackoffUntil = Date.now() + 15 * 60 * 1000;
+        }
+      })
+      .catch((e: any) => {
+        if (timer) clearTimeout(timer);
+        const code = String(e?.code || '');
+        const msg = String(e?.message || e || '');
+        if (code === '7' || msg.includes('PERMISSION_DENIED')) {
+          this.firestoreBackoffUntil = Date.now() + 15 * 60 * 1000;
+          return;
+        }
+        this.firestoreBackoffUntil = Date.now() + 5 * 60 * 1000;
+        console.info(`[Firestore Background Sync Paused] ${label}: ${msg}`);
+      });
+  }
+
   public async getVideoSources(filter?: { contentId?: number; contentType?: 'movie' | 'tv' | string; seasonNumber?: number; episodeNumber?: number; status?: string }) {
     const normType = filter?.contentType ? this.normalizeContentType(filter.contentType) : undefined;
-    try {
-      let query: any = adminDb.collection('videoSources');
-      if (filter?.contentId) query = query.where('contentId', '==', Number(filter.contentId));
-      if (normType) query = query.where('contentType', '==', normType);
-      if (filter?.seasonNumber !== undefined) query = query.where('seasonNumber', '==', Number(filter.seasonNumber));
-      if (filter?.episodeNumber !== undefined) query = query.where('episodeNumber', '==', Number(filter.episodeNumber));
-      if (filter?.status) query = query.where('status', '==', filter.status);
-
-      const snapshot = await query.orderBy('createdAt', 'desc').get();
-      const docs = snapshot.docs.map((doc: any) => ({ id: doc.id, ...doc.data() })) as VideoSource[];
-      if (docs.length > 0) return this.sortSources(docs);
-    } catch (e) {
-      console.warn('[Firestore Warning] Falling back to local store for videoSources:', (e as any)?.message);
-    }
-
     let list = this.data.videoSources || [];
     if (filter?.contentId) list = list.filter(s => Number(s.contentId) === Number(filter.contentId));
     if (normType) list = list.filter(s => this.normalizeContentType(s.contentType) === normType);
@@ -1226,7 +1577,10 @@ class Database {
     return this.sortSources(list);
   }
 
-  public async addVideoSource(source: Omit<VideoSource, 'id' | 'createdAt' | 'updatedAt'>) {
+  public async addVideoSource(
+    source: Omit<VideoSource, 'id' | 'createdAt' | 'updatedAt'>,
+    opts?: { skipSave?: boolean }
+  ) {
     const id = `vid-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
     const now = new Date().toISOString();
     const normType = this.normalizeContentType(source.contentType);
@@ -1234,26 +1588,32 @@ class Database {
     const originalUrl = source.originalUrl || classified.originalUrl || source.url;
     const sourceKind = source.sourceKind || classified.sourceKind;
     const format = source.format || classified.suggestedFormat;
-    // Never mark a newly added source as 'online' unless explicitly verified
     const initialStatus = source.status && source.status !== 'unverified' ? source.status : 'registered';
+    const parsedSeason = normType === 'tv' ? this.parseSeasonNum(source.seasonNumber, 1) : undefined;
+    const parsedEp = normType === 'tv' ? Math.max(1, Number(source.episodeNumber || 1)) : undefined;
 
     const newSource: VideoSource = {
       ...source,
       id,
       contentId: Number(source.contentId),
       contentType: normType,
-      seasonNumber: normType === 'tv' ? Number(source.seasonNumber || 1) : undefined,
-      episodeNumber: normType === 'tv' ? Number(source.episodeNumber || 1) : undefined,
+      seasonNumber: parsedSeason,
+      episodeNumber: parsedEp,
       url: originalUrl,
       originalUrl,
       sourceKind,
       format,
       status: initialStatus,
-      isPrimary: source.isPrimary ?? ((this.data.videoSources || []).filter(v =>
-        Number(v.contentId) === Number(source.contentId) &&
-        this.normalizeContentType(v.contentType) === normType &&
-        (normType !== 'tv' || (Number(v.seasonNumber || 1) === Number(source.seasonNumber || 1) && Number(v.episodeNumber || 1) === Number(source.episodeNumber || 1)))
-      ).length === 0),
+      isPrimary:
+        source.isPrimary ??
+        (this.data.videoSources || []).filter(
+          v =>
+            Number(v.contentId) === Number(source.contentId) &&
+            this.normalizeContentType(v.contentType) === normType &&
+            (normType !== 'tv' ||
+              (this.parseSeasonNum(v.seasonNumber, 1) === parsedSeason &&
+                Math.max(1, Number(v.episodeNumber || 1)) === parsedEp))
+        ).length === 0,
       priority: typeof source.priority === 'number' ? source.priority : 1,
       enabled: source.enabled !== undefined ? source.enabled : true,
       diagnostics: source.diagnostics || classified.diagnostics,
@@ -1275,11 +1635,9 @@ class Database {
       });
     }
 
-    try {
-      await adminDb.collection('videoSources').doc(id).set(newSource);
-    } catch (e) {
-      console.warn('[Firestore Warning] Saved videoSource to local store:', (e as any)?.message);
-    }
+    this.mirrorFirestoreAsync(`add:${id}`, () =>
+      adminDb.collection('videoSources').doc(id).set(this.sanitizeForFirestore(newSource))
+    );
 
     this.data.videoSources.unshift(newSource);
 
@@ -1302,6 +1660,9 @@ class Database {
       enabled: newSource.enabled,
       status: newSource.status,
       audioLanguage: newSource.audioLanguage,
+      subtitleLanguage: newSource.subtitleLanguage,
+      versionType: newSource.versionType,
+      subtitleUrl: newSource.subtitleUrl,
       diagnostics: newSource.diagnostics,
       createdAt: newSource.createdAt,
       updatedAt: newSource.updatedAt
@@ -1328,13 +1689,24 @@ class Database {
       this.data.playerSources.unshift(playerEquivalent);
     }
 
-    this.save();
+    if (!opts?.skipSave) {
+      this.save();
+    }
     return newSource;
   }
 
   public async updateVideoSource(id: string, updates: Partial<VideoSource>) {
     const now = new Date().toISOString();
     const enrichedUpdates: Partial<VideoSource> = { ...updates, updatedAt: now };
+
+    if (updates.subtitleUrl !== undefined) {
+      const cleanSub = String(updates.subtitleUrl || '').trim();
+      enrichedUpdates.subtitleUrl = cleanSub || undefined;
+    }
+
+    if (updates.versionType !== undefined) {
+      enrichedUpdates.versionType = normalizeVersionType(updates.versionType) || updates.versionType;
+    }
 
     if (updates.url) {
       const classified = classifySourceUrl(updates.url);
@@ -1344,15 +1716,18 @@ class Database {
       enrichedUpdates.diagnostics = updates.diagnostics || classified.diagnostics;
     }
 
-    try {
+    this.mirrorFirestoreAsync(`update:${id}`, () => {
       const ref = adminDb.collection('videoSources').doc(id);
-      await ref.update(enrichedUpdates);
-    } catch (e) {
-      console.warn('[Firestore Warning] Updated videoSource in local store:', (e as any)?.message);
-    }
+      const firestorePayload = this.sanitizeForFirestore({ ...enrichedUpdates }) as Record<string, any>;
+      if (updates.subtitleUrl !== undefined && !enrichedUpdates.subtitleUrl) {
+        firestorePayload.subtitleUrl = '';
+      }
+      return ref.update(firestorePayload);
+    });
 
     this.data.videoSources = this.data.videoSources || [];
     const idx = this.data.videoSources.findIndex(s => s.id === id);
+    const pIdx = this.data.playerSources.findIndex(s => s.id === `src-${id}` || s.id === id);
     let updatedRecord: VideoSource;
 
     if (idx >= 0) {
@@ -1372,12 +1747,50 @@ class Database {
       }
       this.data.videoSources[idx] = target;
       updatedRecord = target;
+    } else if (pIdx >= 0) {
+      const legacy = this.data.playerSources[pIdx];
+      const normType = this.normalizeContentType(legacy.type);
+      if (enrichedUpdates.isPrimary) {
+        this.data.playerSources.forEach((s, i) => {
+          if (
+            i !== pIdx &&
+            Number(s.tmdbId) === Number(legacy.tmdbId) &&
+            this.normalizeContentType(s.type) === normType &&
+            (normType !== 'tv' || (s.season === legacy.season && s.episode === legacy.episode))
+          ) {
+            s.isPrimary = false;
+          }
+        });
+      }
+      updatedRecord = {
+        id: legacy.id,
+        contentId: Number(legacy.tmdbId),
+        contentType: normType,
+        seasonNumber: legacy.season,
+        episodeNumber: legacy.episode,
+        url: enrichedUpdates.url ?? legacy.url,
+        originalUrl: enrichedUpdates.originalUrl ?? legacy.originalUrl ?? legacy.url,
+        sourceKind: enrichedUpdates.sourceKind ?? legacy.sourceKind,
+        format: (enrichedUpdates.format ?? legacy.format) as any,
+        serverName: enrichedUpdates.serverName ?? legacy.provider ?? legacy.label,
+        quality: enrichedUpdates.quality ?? legacy.quality,
+        audioLanguage: enrichedUpdates.audioLanguage ?? legacy.audioLanguage,
+        subtitleLanguage: enrichedUpdates.subtitleLanguage ?? legacy.subtitleLanguage,
+        versionType: (enrichedUpdates.versionType ?? legacy.versionType) as any,
+        subtitleUrl: updates.subtitleUrl !== undefined ? enrichedUpdates.subtitleUrl : legacy.subtitleUrl,
+        isPrimary: enrichedUpdates.isPrimary ?? legacy.isPrimary,
+        priority: enrichedUpdates.priority ?? legacy.priority,
+        enabled: enrichedUpdates.enabled ?? legacy.enabled,
+        status: (enrichedUpdates.status ?? legacy.status ?? 'registered') as any,
+        diagnostics: enrichedUpdates.diagnostics ?? legacy.diagnostics,
+        createdAt: legacy.createdAt || now,
+        updatedAt: now
+      };
     } else {
       updatedRecord = { id, ...(enrichedUpdates as any) } as VideoSource;
     }
 
     // Sync update into playerSources
-    const pIdx = this.data.playerSources.findIndex(s => s.id === `src-${id}` || s.id === id);
     if (pIdx >= 0) {
       this.data.playerSources[pIdx] = {
         ...this.data.playerSources[pIdx],
@@ -1389,6 +1802,9 @@ class Database {
         label: updatedRecord.serverName ?? updatedRecord.sourceName ?? this.data.playerSources[pIdx].label,
         quality: updatedRecord.quality ?? this.data.playerSources[pIdx].quality,
         audioLanguage: updatedRecord.audioLanguage ?? this.data.playerSources[pIdx].audioLanguage,
+        subtitleLanguage: updatedRecord.subtitleLanguage ?? this.data.playerSources[pIdx].subtitleLanguage,
+        versionType: updatedRecord.versionType ?? this.data.playerSources[pIdx].versionType,
+        subtitleUrl: updates.subtitleUrl !== undefined ? updatedRecord.subtitleUrl : this.data.playerSources[pIdx].subtitleUrl,
         isPrimary: updatedRecord.isPrimary ?? this.data.playerSources[pIdx].isPrimary,
         priority: updatedRecord.priority ?? this.data.playerSources[pIdx].priority,
         enabled: updatedRecord.enabled ?? this.data.playerSources[pIdx].enabled,
@@ -1402,12 +1818,8 @@ class Database {
     return updatedRecord;
   }
 
-  public async deleteVideoSource(id: string) {
-    try {
-      await adminDb.collection('videoSources').doc(id).delete();
-    } catch (e) {
-      console.warn('[Firestore Warning] Deleted videoSource from local store:', (e as any)?.message);
-    }
+  public async deleteVideoSource(id: string, opts?: { skipSave?: boolean }) {
+    this.mirrorFirestoreAsync(`delete:${id}`, () => adminDb.collection('videoSources').doc(id).delete());
 
     let removedTarget: VideoSource | undefined;
     if (this.data.videoSources) {
@@ -1416,6 +1828,8 @@ class Database {
     }
 
     const removedUrl = removedTarget?.url;
+    const targetSeason = removedTarget ? this.parseSeasonNum(removedTarget.seasonNumber, 1) : 1;
+    const targetEp = removedTarget ? Math.max(1, Number(removedTarget.episodeNumber || 1)) : 1;
     this.data.playerSources = this.data.playerSources.filter(s => {
       if (s.id === `src-${id}` || s.id === id) return false;
       if (removedTarget && removedUrl && s.url === removedUrl) {
@@ -1423,14 +1837,16 @@ class Database {
         const sameType = this.normalizeContentType(s.type) === this.normalizeContentType(removedTarget.contentType);
         const sameEp =
           this.normalizeContentType(removedTarget.contentType) !== 'tv' ||
-          (Number(s.season || 1) === Number(removedTarget.seasonNumber || 1) &&
-            Number(s.episode || 1) === Number(removedTarget.episodeNumber || 1));
+          (this.parseSeasonNum(s.season, 1) === targetSeason &&
+            Math.max(1, Number(s.episode || 1)) === targetEp);
         if (sameTmdb && sameType && sameEp) return false;
       }
       return true;
     });
 
-    this.save();
+    if (!opts?.skipSave) {
+      this.save();
+    }
     return true;
   }
 
@@ -1456,6 +1872,9 @@ class Database {
       serverName: input.serverName,
       format: input.format,
       audioLanguage: input.audioLanguage,
+      subtitleLanguage: input.subtitleLanguage,
+      versionType: input.versionType,
+      subtitleUrl: input.subtitleUrl,
       quality: input.quality,
       updatedAt: new Date().toISOString()
     };
@@ -1475,13 +1894,15 @@ class Database {
     const normType = this.normalizeContentType(params.contentType);
     const cleanUrl = (params.url || '').trim();
     const targetId = Number(params.contentId);
+    const targetSeason = this.parseSeasonNum(params.seasonNumber, 1);
+    const targetEp = Math.max(1, Number(params.episodeNumber || 1));
     return (this.data.videoSources || []).find(s => {
       if (params.excludeId && s.id === params.excludeId) return false;
       if (Number(s.contentId) !== targetId) return false;
       if (this.normalizeContentType(s.contentType) !== normType) return false;
       if (normType === 'tv') {
-        if (Number(s.seasonNumber || 1) !== Number(params.seasonNumber || 1)) return false;
-        if (Number(s.episodeNumber || 1) !== Number(params.episodeNumber || 1)) return false;
+        if (this.parseSeasonNum(s.seasonNumber, 1) !== targetSeason) return false;
+        if (Math.max(1, Number(s.episodeNumber || 1)) !== targetEp) return false;
       }
       return (s.originalUrl || s.url || '').trim() === cleanUrl;
     });
@@ -1495,6 +1916,9 @@ class Database {
     serverName?: string;
     format?: string;
     audioLanguage?: string;
+    subtitleLanguage?: string;
+    versionType?: string;
+    subtitleUrl?: string;
     quality?: string;
     isPrimary?: boolean;
     priority?: number;
@@ -1515,7 +1939,7 @@ class Database {
     }>;
   }): Promise<BatchEpisodeSourcesResult> {
     const tmdbId = Number(input.contentId);
-    const seasonNumber = Math.max(0, Number(input.seasonNumber));
+    const seasonNumber = this.parseSeasonNum(input.seasonNumber, 1);
     const media = this.getMediaByTmdbAndType(tmdbId, 'tv');
     if (!media) {
       throw new Error(
@@ -1530,9 +1954,8 @@ class Database {
     const conflicts: Array<{ episodeNumber: number; existingCount: number; action: string }> = [];
     const savedSources: VideoSource[] = [];
 
-    // 1. Update episodes inside existing series season ONLY for explicitly confirmed episodes
     const existingSeasons = Array.isArray(media.seasons) ? media.seasons.map(s => ({ ...s, episodes: [...(s.episodes || [])] })) : [];
-    let targetSeason = existingSeasons.find(s => Number(s.seasonNumber) === seasonNumber);
+    let targetSeason = existingSeasons.find(s => this.parseSeasonNum(s.seasonNumber, 1) === seasonNumber);
     if (!targetSeason) {
       targetSeason = {
         id: `season-${seasonNumber}`,
@@ -1544,22 +1967,35 @@ class Database {
       existingSeasons.push(targetSeason);
     }
 
+    // Build an O(1) index of existing videoSources for this series + season so large batches are instant
+    const seasonSourcesByEp = new Map<number, VideoSource[]>();
+    for (const s of this.data.videoSources || []) {
+      if (
+        Number(s.contentId) === tmdbId &&
+        this.normalizeContentType(s.contentType) === 'tv' &&
+        this.parseSeasonNum(s.seasonNumber, 1) === seasonNumber
+      ) {
+        const eNum = Math.max(1, Number(s.episodeNumber || 1));
+        const list = seasonSourcesByEp.get(eNum) || [];
+        list.push(s);
+        seasonSourcesByEp.set(eNum, list);
+      }
+    }
+
+    const epMap = new Map<number, Episode>();
+    for (const existingEp of targetSeason.episodes || []) {
+      epMap.set(Number(existingEp.episodeNumber), { ...existingEp });
+    }
+
     for (const ep of input.episodes) {
       const epNum = Math.max(1, Number(ep.episodeNumber));
-      const existingForEp = (this.data.videoSources || []).filter(
-        s =>
-          Number(s.contentId) === tmdbId &&
-          this.normalizeContentType(s.contentType) === 'tv' &&
-          Number(s.seasonNumber || 1) === seasonNumber &&
-          Number(s.episodeNumber || 1) === epNum
-      );
+      const existingForEp = seasonSourcesByEp.get(epNum) || [];
 
-      // Associate episode metadata into the season if not already present (preserving existing custom data)
-      const epList = targetSeason.episodes || [];
-      const existingEpMetaIdx = epList.findIndex(e => Number(e.episodeNumber) === epNum);
-      if (existingEpMetaIdx < 0) {
-        epList.push({
+      const prevEpMeta = epMap.get(epNum);
+      if (!prevEpMeta) {
+        epMap.set(epNum, {
           id: `ep-${tmdbId}-${seasonNumber}-${epNum}`,
+          tmdbId,
           seasonNumber,
           episodeNumber: epNum,
           title: ep.title || `Episódio ${epNum}`,
@@ -1569,8 +2005,19 @@ class Database {
           airDate: ep.airDate,
           voteAverage: ep.voteAverage
         });
+      } else {
+        const isGenericTitle = !prevEpMeta.title || /^epis[oó]dio\s+\d+$/i.test(prevEpMeta.title.trim());
+        epMap.set(epNum, {
+          ...prevEpMeta,
+          tmdbId: prevEpMeta.tmdbId || tmdbId,
+          title: (isGenericTitle && ep.title) ? ep.title : (prevEpMeta.title || ep.title || `Episódio ${epNum}`),
+          overview: prevEpMeta.overview || ep.overview || '',
+          stillPath: prevEpMeta.stillPath || ep.stillPath,
+          duration: prevEpMeta.duration || ep.duration,
+          airDate: prevEpMeta.airDate || ep.airDate,
+          voteAverage: prevEpMeta.voteAverage !== undefined ? prevEpMeta.voteAverage : ep.voteAverage
+        });
       }
-      targetSeason.episodes = epList;
 
       const classified = classifySourceUrl(ep.url);
       if (existingForEp.length > 0) {
@@ -1582,9 +2029,48 @@ class Database {
 
         if (input.conflictMode === 'overwrite') {
           for (const old of existingForEp) {
-            await this.deleteVideoSource(old.id);
+            await this.deleteVideoSource(old.id, { skipSave: true });
           }
-          const created = await this.addVideoSource({
+          const created = await this.addVideoSource(
+            {
+              contentId: tmdbId,
+              contentType: 'tv',
+              seasonNumber,
+              episodeNumber: epNum,
+              serverName: input.serverName || classified.suggestedServerName || 'MGEB Endpoint',
+              url: classified.originalUrl,
+              originalUrl: classified.originalUrl,
+              sourceKind: classified.sourceKind,
+              format: (input.format || classified.suggestedFormat) as any,
+              audioLanguage: input.audioLanguage || 'Português',
+              subtitleLanguage: input.subtitleLanguage,
+              versionType: input.versionType,
+              subtitleUrl: input.subtitleUrl,
+              quality: input.quality || '1080p',
+              isPrimary: input.isPrimary !== undefined ? input.isPrimary : true,
+              priority: typeof input.priority === 'number' ? input.priority : 1,
+              enabled: input.enabled !== undefined ? input.enabled : true,
+              status: (ep.status || 'registered') as any,
+              diagnostics: ep.diagnostics || classified.diagnostics
+            },
+            { skipSave: true }
+          );
+          seasonSourcesByEp.set(epNum, [created]);
+          savedSources.push(created);
+          updatedCount++;
+          conflicts.push({ episodeNumber: epNum, existingCount: existingForEp.length, action: 'overwritten' });
+          continue;
+        }
+
+        const exactDup = existingForEp.find(s => (s.originalUrl || s.url || '').trim() === classified.originalUrl.trim());
+        if (exactDup) {
+          skippedCount++;
+          conflicts.push({ episodeNumber: epNum, existingCount: existingForEp.length, action: 'duplicate_skipped' });
+          continue;
+        }
+
+        const altCreated = await this.addVideoSource(
+          {
             contentId: tmdbId,
             contentType: 'tv',
             seasonNumber,
@@ -1595,28 +2081,28 @@ class Database {
             sourceKind: classified.sourceKind,
             format: (input.format || classified.suggestedFormat) as any,
             audioLanguage: input.audioLanguage || 'Português',
+            subtitleLanguage: input.subtitleLanguage,
+            versionType: input.versionType,
+            subtitleUrl: input.subtitleUrl,
             quality: input.quality || '1080p',
-            isPrimary: input.isPrimary !== undefined ? input.isPrimary : true,
-            priority: typeof input.priority === 'number' ? input.priority : 1,
+            isPrimary: false,
+            priority: typeof input.priority === 'number' ? Math.max(2, input.priority) : existingForEp.length + 1,
             enabled: input.enabled !== undefined ? input.enabled : true,
             status: (ep.status || 'registered') as any,
             diagnostics: ep.diagnostics || classified.diagnostics
-          });
-          savedSources.push(created);
-          updatedCount++;
-          conflicts.push({ episodeNumber: epNum, existingCount: existingForEp.length, action: 'overwritten' });
-          continue;
-        }
+          },
+          { skipSave: true }
+        );
+        existingForEp.push(altCreated);
+        seasonSourcesByEp.set(epNum, existingForEp);
+        savedSources.push(altCreated);
+        alternativeCount++;
+        conflicts.push({ episodeNumber: epNum, existingCount: existingForEp.length, action: 'added_alternative' });
+        continue;
+      }
 
-        // add_alternative: check exact duplicate first
-        const exactDup = existingForEp.find(s => (s.originalUrl || s.url || '').trim() === classified.originalUrl.trim());
-        if (exactDup) {
-          skippedCount++;
-          conflicts.push({ episodeNumber: epNum, existingCount: existingForEp.length, action: 'duplicate_skipped' });
-          continue;
-        }
-
-        const altCreated = await this.addVideoSource({
+      const created = await this.addVideoSource(
+        {
           contentId: tmdbId,
           contentType: 'tv',
           seasonNumber,
@@ -1627,43 +2113,24 @@ class Database {
           sourceKind: classified.sourceKind,
           format: (input.format || classified.suggestedFormat) as any,
           audioLanguage: input.audioLanguage || 'Português',
+          subtitleLanguage: input.subtitleLanguage,
+          versionType: input.versionType,
+          subtitleUrl: input.subtitleUrl,
           quality: input.quality || '1080p',
-          isPrimary: false,
-          priority: typeof input.priority === 'number' ? Math.max(2, input.priority) : existingForEp.length + 1,
+          isPrimary: input.isPrimary !== undefined ? input.isPrimary : true,
+          priority: typeof input.priority === 'number' ? input.priority : 1,
           enabled: input.enabled !== undefined ? input.enabled : true,
           status: (ep.status || 'registered') as any,
           diagnostics: ep.diagnostics || classified.diagnostics
-        });
-        savedSources.push(altCreated);
-        alternativeCount++;
-        conflicts.push({ episodeNumber: epNum, existingCount: existingForEp.length, action: 'added_alternative' });
-        continue;
-      }
-
-      const created = await this.addVideoSource({
-        contentId: tmdbId,
-        contentType: 'tv',
-        seasonNumber,
-        episodeNumber: epNum,
-        serverName: input.serverName || classified.suggestedServerName || 'MGEB Endpoint',
-        url: classified.originalUrl,
-        originalUrl: classified.originalUrl,
-        sourceKind: classified.sourceKind,
-        format: (input.format || classified.suggestedFormat) as any,
-        audioLanguage: input.audioLanguage || 'Português',
-        quality: input.quality || '1080p',
-        isPrimary: input.isPrimary !== undefined ? input.isPrimary : true,
-        priority: typeof input.priority === 'number' ? input.priority : 1,
-        enabled: input.enabled !== undefined ? input.enabled : true,
-        status: (ep.status || 'registered') as any,
-        diagnostics: ep.diagnostics || classified.diagnostics
-      });
+        },
+        { skipSave: true }
+      );
+      seasonSourcesByEp.set(epNum, [created]);
       savedSources.push(created);
       addedCount++;
     }
 
-    // Sort episodes and update counts safely on targetSeason
-    targetSeason.episodes = (targetSeason.episodes || []).sort((a, b) => Number(a.episodeNumber) - Number(b.episodeNumber));
+    targetSeason.episodes = Array.from(epMap.values()).sort((a, b) => Number(a.episodeNumber) - Number(b.episodeNumber));
     targetSeason.episodeCount = Math.max(Number(targetSeason.episodeCount || 0), targetSeason.episodes.length);
     existingSeasons.sort((a, b) => Number(a.seasonNumber) - Number(b.seasonNumber));
     this.saveMedia({
@@ -1673,7 +2140,6 @@ class Database {
       episodesCount: existingSeasons.reduce((acc, s) => acc + Math.max(Number(s.episodeCount || 0), (s.episodes || []).length), 0)
     });
 
-    // Save per-season base URL template if provided
     if (input.seasonBaseUrl && input.seasonBaseUrl.trim()) {
       this.saveSeasonSourceTemplate({
         contentId: tmdbId,
@@ -1683,6 +2149,9 @@ class Database {
         serverName: input.serverName,
         format: input.format,
         audioLanguage: input.audioLanguage,
+        subtitleLanguage: input.subtitleLanguage,
+        versionType: input.versionType,
+        subtitleUrl: input.subtitleUrl,
         quality: input.quality
       });
     }
@@ -1709,14 +2178,7 @@ class Database {
   }
 
   public async getAllVideoSources() {
-    try {
-      const snapshot = await adminDb.collection('videoSources').orderBy('createdAt', 'desc').get();
-      const docs = snapshot.docs.map((doc: any) => ({ id: doc.id, ...doc.data() })) as VideoSource[];
-      if (docs.length > 0) return docs;
-    } catch (e) {
-      // fallback below
-    }
-    return this.data.videoSources || [];
+    return this.sortSources(this.data.videoSources || []);
   }
 
   // --- STATS & AUDIT ---
@@ -1724,6 +2186,8 @@ class Database {
     const activeMedia = this.data.media.filter(m => !m.deletedAt);
     const movies = activeMedia.filter(m => this.normalizeMediaType(m.type) === 'movie');
     const series = activeMedia.filter(m => this.normalizeMediaType(m.type) === 'tv');
+    const animes = activeMedia.filter(m => this.hasCategory(m, 'anime'));
+    const doramas = activeMedia.filter(m => this.hasCategory(m, 'dorama'));
     const deletedMovies = this.data.media.filter(m => Boolean(m.deletedAt) && this.normalizeMediaType(m.type) === 'movie').length;
     const deletedSeries = this.data.media.filter(m => Boolean(m.deletedAt) && this.normalizeMediaType(m.type) === 'tv').length;
 
@@ -1740,6 +2204,10 @@ class Database {
     let unpublishedMovies = 0;
     let moviesWithoutSource = 0;
     let totalProblematic = 0;
+    let missingPoster = 0;
+    let incompleteInfo = 0;
+    let invalidTmdb = 0;
+    let missingSource = 0;
 
     for (const m of movies) {
       if (this.isMediaPublished(m)) publishedMovies++;
@@ -1748,6 +2216,10 @@ class Database {
       if (!sSummary.hasSource) moviesWithoutSource++;
       const diag = this.computeMediaDiagnostics(m, sSummary, dupMap);
       if (!diag.isComplete) totalProblematic++;
+      if (!diag.checks.hasPoster) missingPoster++;
+      if (!diag.checks.hasOverview || !diag.checks.hasGenres) incompleteInfo++;
+      if (!diag.checks.hasTmdbId) invalidTmdb++;
+      if (!diag.checks.hasSource) missingSource++;
     }
 
     let publishedSeries = 0;
@@ -1761,7 +2233,14 @@ class Database {
       if (!sSummary.hasSource) seriesWithoutSource++;
       const diag = this.computeMediaDiagnostics(s, sSummary, dupMap);
       if (!diag.isComplete) totalProblematic++;
+      if (!diag.checks.hasPoster) missingPoster++;
+      if (!diag.checks.hasOverview || !diag.checks.hasGenres) incompleteInfo++;
+      if (!diag.checks.hasTmdbId) invalidTmdb++;
+      if (!diag.checks.hasSource) missingSource++;
     }
+
+    const publishedAnimes = animes.filter(m => this.isMediaPublished(m)).length;
+    const publishedDoramas = doramas.filter(m => this.isMediaPublished(m)).length;
 
     const vSources = this.data.videoSources || [];
     const uniqueSourceUrls = new Map<string, string>();
@@ -1787,6 +2266,12 @@ class Database {
         tmdbId: m.tmdbId,
         title: m.title,
         type: this.normalizeMediaType(m.type),
+        categories: Array.isArray(m.categories)
+          ? this.normalizeCategories(m.categories)
+          : [
+              ...(this.hasCategory(m, 'anime') ? ['anime'] : []),
+              ...(this.hasCategory(m, 'dorama') ? ['dorama'] : [])
+            ],
         posterPath: m.posterPath,
         releaseYear: this.extractMediaYear(m) || undefined,
         voteAverage: m.voteAverage,
@@ -1802,6 +2287,10 @@ class Database {
       totalSeries: series.length,
       totalSeasons,
       totalEpisodes,
+      totalAnimes: animes.length,
+      totalDoramas: doramas.length,
+      publishedAnimes,
+      publishedDoramas,
       totalUsers: this.data.users.length,
       totalViews: 0,
       publishedMovies,
@@ -1813,6 +2302,13 @@ class Database {
       deletedMovies,
       deletedSeries,
       totalProblematic,
+      metadataAlertsCount: missingPoster + incompleteInfo + invalidTmdb,
+      metadataAlerts: {
+        missingPoster,
+        incompleteInfo,
+        invalidTmdb,
+        missingSource
+      },
       top10Count: activeMedia.filter(m => m.isTop10).length,
       totalLinks: uniqueSourceUrls.size,
       onlineLinks,
@@ -1827,6 +2323,8 @@ class Database {
     const moviesCount = activeMedia.filter(m => this.normalizeMediaType(m.type) === 'movie').length;
     const seriesList = activeMedia.filter(m => this.normalizeMediaType(m.type) === 'tv');
     const seriesCount = seriesList.length;
+    const animesCount = activeMedia.filter(m => this.hasCategory(m, 'anime')).length;
+    const doramasCount = activeMedia.filter(m => this.hasCategory(m, 'dorama')).length;
 
     let episodesCount = 0;
     seriesList.forEach(s => {
@@ -1837,18 +2335,33 @@ class Database {
       moviesCount,
       seriesCount,
       episodesCount,
+      animesCount,
+      doramasCount,
       totalCatalog: moviesCount + seriesCount,
       status: 'Online'
     };
   }
 
   public async getAuditLogs() {
-    try {
-      const snapshot = await adminDb.collection('auditLogs').orderBy('timestamp', 'desc').limit(100).get();
-      const docs = snapshot.docs.map((doc: any) => ({ id: doc.id, ...doc.data() }));
-      if (docs.length > 0) return docs;
-    } catch (e) {
-      // fallback below
+    if (Date.now() >= this.firestoreBackoffUntil) {
+      try {
+        const snapshot = await Promise.race([
+          adminDb.collection('auditLogs').orderBy('timestamp', 'desc').limit(100).get(),
+          new Promise<null>(resolve => setTimeout(() => resolve(null), 1200))
+        ]);
+        if (snapshot && 'docs' in snapshot) {
+          const docs = snapshot.docs.map((doc: any) => ({ id: doc.id, ...doc.data() }));
+          if (docs.length > 0) return docs;
+        } else if (snapshot === null) {
+          this.firestoreBackoffUntil = Date.now() + 15 * 60 * 1000;
+        }
+      } catch (e: any) {
+        const code = String(e?.code || '');
+        const msg = String(e?.message || '');
+        if (code === '7' || msg.includes('PERMISSION_DENIED')) {
+          this.firestoreBackoffUntil = Date.now() + 15 * 60 * 1000;
+        }
+      }
     }
     return this.data.auditLogs || [];
   }
@@ -1863,17 +2376,15 @@ class Database {
       details,
       timestamp: new Date().toISOString()
     };
-    try {
-      await adminDb.collection('auditLogs').add(log);
-    } catch (e) {
-      // Clean fallback to local store
-    }
     this.data.auditLogs = this.data.auditLogs || [];
     this.data.auditLogs.unshift(log);
     if (this.data.auditLogs.length > 500) {
       this.data.auditLogs = this.data.auditLogs.slice(0, 500);
     }
     this.save();
+    this.mirrorFirestoreAsync(`auditLog:${log.id}`, () =>
+      adminDb.collection('auditLogs').add(this.sanitizeForFirestore(log))
+    );
     return log;
   }
 
@@ -1939,6 +2450,11 @@ class Database {
     const cleanUpdates = { ...updates };
     delete (cleanUpdates as any).sourceSummary;
     delete (cleanUpdates as any).diagnosticSummary;
+    delete (cleanUpdates as any).hasPlayableSource;
+    delete (cleanUpdates as any).inCatalog;
+    if (cleanUpdates.categories !== undefined) {
+      cleanUpdates.categories = this.normalizeCategories(cleanUpdates.categories);
+    }
     return this.saveMedia({ ...item, ...cleanUpdates, id: item.id });
   }
   public async addActivityLog(typeOrLog: any, message?: string) {
@@ -1948,14 +2464,134 @@ class Database {
     const log = typeOrLog;
     return this.addAuditLog(log.userEmail || 'system', log.action || 'ACTIVITY', 'SUCCESS', log.details || message || '');
   }
-  public saveWatchProgress(userId: string, data: any) {
-    return { userId, ...data, updatedAt: new Date().toISOString() };
+  public saveWatchProgress(userId: string, data: any): WatchProgress {
+    const list = (this.data.watchProgress = this.data.watchProgress || []);
+    const mediaType: 'movie' | 'tv' =
+      data.mediaType === 'tv' || data.mediaType === 'series' ? 'tv' : 'movie';
+    const tmdbId = Number(data.tmdbId || 0);
+    const rawSeason = data.seasonNumber ?? data.season;
+    const rawEpisode = data.episodeNumber ?? data.episode;
+    const parsedSeason = rawSeason !== undefined && rawSeason !== null && rawSeason !== '' ? Number(rawSeason) : NaN;
+    const parsedEpisode = rawEpisode !== undefined && rawEpisode !== null && rawEpisode !== '' ? Number(rawEpisode) : NaN;
+    const seasonNumber =
+      mediaType === 'tv' ? (Number.isFinite(parsedSeason) ? Math.max(0, Math.floor(parsedSeason)) : 1) : undefined;
+    const episodeNumber =
+      mediaType === 'tv' ? (Number.isFinite(parsedEpisode) ? Math.max(1, Math.floor(parsedEpisode)) : 1) : undefined;
+
+    const rawPos = Math.max(0, Math.floor(Number(data.positionSeconds || 0)));
+    const dur = Math.max(0, Math.floor(Number(data.durationSeconds || 0)));
+    const isCompleted =
+      Boolean(data.completed) || (dur > 60 && rawPos >= dur * 0.93);
+    const finalPos = isCompleted ? 0 : rawPos;
+    const finalPct = isCompleted
+      ? 100
+      : dur > 0
+        ? Math.min(100, Math.max(0, Math.round((finalPos / dur) * 100)))
+        : Math.min(100, Math.max(0, Math.round(Number(data.progressPercent || 0))));
+
+    const keyId =
+      mediaType === 'tv'
+        ? `${userId}:tv:${tmdbId}:s${seasonNumber}:e${episodeNumber}`
+        : `${userId}:movie:${tmdbId}`;
+
+    const entry: WatchProgress = {
+      id: keyId,
+      userId: String(userId),
+      mediaId: String(data.mediaId || `${mediaType === 'tv' ? 'series' : 'movie'}-${tmdbId}`),
+      tmdbId,
+      mediaType,
+      title: String(data.title || 'Conteúdo'),
+      posterPath: String(data.posterPath || ''),
+      backdropPath: String(data.backdropPath || ''),
+      ...(mediaType === 'tv' ? { seasonNumber, episodeNumber } : {}),
+      progressPercent: finalPct,
+      durationSeconds: dur,
+      positionSeconds: finalPos,
+      completed: isCompleted,
+      updatedAt: new Date().toISOString()
+    };
+
+    const existingIdx = list.findIndex(p => {
+      if (String(p.userId) !== String(userId)) return false;
+      if (Number(p.tmdbId) !== tmdbId || p.mediaType !== mediaType) return false;
+      if (mediaType === 'tv') {
+        return Number(p.seasonNumber ?? 1) === seasonNumber && Number(p.episodeNumber ?? 1) === episodeNumber;
+      }
+      return true;
+    });
+
+    if (existingIdx >= 0) {
+      list[existingIdx] = { ...list[existingIdx], ...entry };
+    } else {
+      list.unshift(entry);
+    }
+
+    if (list.length > 5000) {
+      this.data.watchProgress = list
+        .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
+        .slice(0, 5000);
+    }
+
+    this.save();
+    return entry;
   }
+
   public toggleServer(serverId: string, enabled: boolean) {
     return { success: true, serverId, enabled };
   }
-  public getWatchProgressList(userId: string) {
-    return [];
+
+  public getWatchProgressList(userId: string): WatchProgress[] {
+    const list = this.data.watchProgress || [];
+    return list
+      .filter(p => String(p.userId) === String(userId))
+      .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+  }
+
+  public resetWatchProgress(
+    userId: string,
+    filter: { tmdbId: number; mediaType?: string; seasonNumber?: number; episodeNumber?: number }
+  ): { removedCount: number } {
+    const list = this.data.watchProgress || [];
+    const normType: 'movie' | 'tv' =
+      filter.mediaType === 'tv' || filter.mediaType === 'series' ? 'tv' : 'movie';
+    const tmdbId = Number(filter.tmdbId || 0);
+    const before = list.length;
+
+    this.data.watchProgress = list.filter(p => {
+      if (String(p.userId) !== String(userId)) return true;
+      if (Number(p.tmdbId) !== tmdbId || p.mediaType !== normType) return true;
+      if (normType === 'tv') {
+        const s = Number(filter.seasonNumber ?? 1);
+        const e = Number(filter.episodeNumber ?? 1);
+        return !(Number(p.seasonNumber ?? 1) === s && Number(p.episodeNumber ?? 1) === e);
+      }
+      return false;
+    });
+
+    const removedCount = before - this.data.watchProgress.length;
+    if (removedCount > 0) this.save();
+    return { removedCount };
+  }
+
+  public addLinkImportHistory(
+    item: Omit<LinkImportHistoryItem, 'id' | 'timestamp'> & { id?: string; timestamp?: string }
+  ): LinkImportHistoryItem {
+    const entry: LinkImportHistoryItem = {
+      ...item,
+      id: item.id || `lnk_${Date.now().toString(36)}_${crypto.randomBytes(2).toString('hex')}`,
+      timestamp: item.timestamp || new Date().toISOString()
+    };
+    this.data.linkImportHistory = this.data.linkImportHistory || [];
+    this.data.linkImportHistory.unshift(entry);
+    if (this.data.linkImportHistory.length > 300) {
+      this.data.linkImportHistory = this.data.linkImportHistory.slice(0, 300);
+    }
+    this.save();
+    return entry;
+  }
+
+  public getLinkImportHistory(limit = 100): LinkImportHistoryItem[] {
+    return (this.data.linkImportHistory || []).slice(0, limit);
   }
   public addToHistory(userId: string, item: any) {}
   public getHistory(userId: string) {
@@ -2232,6 +2868,296 @@ class Database {
     return false;
   }
 
+  // --- SERIES COMPARISON & UNLIMITED SEASON/EPISODE ANALYTICS ---
+  public getSeriesComparisonStats(
+    tmdbId: number,
+    officialTmdbSeasons?: Array<{ seasonNumber: number; name?: string; episodeCount?: number }>
+  ): SeriesComparisonReport {
+    const cleanId = Number(tmdbId);
+    const media = this.getMediaByTmdbAndType(cleanId, 'tv');
+    const localSeasons = Array.isArray(media?.seasons) ? media!.seasons : [];
+
+    // Gather all TV sources mapped strictly by TMDB_ID + SEASON_NUMBER + EPISODE_NUMBER
+    const sourceMap = new Map<string, Array<{ status: string; url: string; enabled: boolean }>>();
+    const recordSrc = (sNumRaw: any, eNumRaw: any, url: any, status: any, enabled: any) => {
+      const cleanUrl = String(url || '').trim();
+      if (!cleanUrl) return;
+      const s = this.parseSeasonNum(sNumRaw, 1);
+      const e = Math.max(1, Number(eNumRaw || 1));
+      const key = `${cleanId}:${s}:${e}`;
+      const list = sourceMap.get(key) || [];
+      list.push({ status: String(status || 'registered').toLowerCase(), url: cleanUrl, enabled: enabled !== false });
+      sourceMap.set(key, list);
+    };
+
+    for (const v of this.data.videoSources || []) {
+      if (Number(v.contentId) === cleanId && this.normalizeContentType(v.contentType) === 'tv') {
+        recordSrc(v.seasonNumber, v.episodeNumber, v.url, v.status, v.enabled);
+      }
+    }
+    for (const p of this.data.playerSources || []) {
+      if (Number(p.tmdbId) === cleanId && this.normalizeContentType(p.type) === 'tv') {
+        recordSrc(p.season, p.episode, p.url, p.status, p.enabled);
+      }
+    }
+
+    const seasonNumbers = new Set<number>();
+    const officialMap = new Map<number, { seasonNumber: number; name?: string; episodeCount?: number }>();
+    for (const o of officialTmdbSeasons || []) {
+      const sNum = this.parseSeasonNum(o.seasonNumber, 1);
+      seasonNumbers.add(sNum);
+      officialMap.set(sNum, { ...o, seasonNumber: sNum });
+    }
+    const localSeasonMap = new Map<number, Season>();
+    for (const ls of localSeasons) {
+      const sNum = this.parseSeasonNum(ls.seasonNumber, 1);
+      seasonNumbers.add(sNum);
+      localSeasonMap.set(sNum, ls);
+    }
+    for (const key of sourceMap.keys()) {
+      const parts = key.split(':');
+      seasonNumbers.add(this.parseSeasonNum(parts[1], 1));
+    }
+
+    const sortedNums = Array.from(seasonNumbers).sort((a, b) => a - b);
+    const seasonsStats: SeasonComparisonStats[] = [];
+
+    let totalExpected = 0;
+    let totalFound = 0;
+    let totalWithLink = 0;
+    let totalWithoutLink = 0;
+    let totalValidated = 0;
+    let totalErrors = 0;
+
+    for (const sNum of sortedNums) {
+      const official = officialMap.get(sNum);
+      const local = localSeasonMap.get(sNum);
+      const hydratedEps = Array.isArray(local?.episodes) ? local!.episodes : [];
+
+      const epNumbersForSeason = new Set<number>();
+      for (const ep of hydratedEps) {
+        if (ep && ep.episodeNumber) epNumbersForSeason.add(Number(ep.episodeNumber));
+      }
+      for (const key of sourceMap.keys()) {
+        const [, kS, kE] = key.split(':');
+        if (this.parseSeasonNum(kS, 1) === sNum) {
+          epNumbersForSeason.add(Number(kE));
+        }
+      }
+
+      const expected = Math.max(
+        Number(official?.episodeCount || 0),
+        Number(local?.episodeCount || 0),
+        hydratedEps.length
+      );
+      const found = hydratedEps.length > 0 ? hydratedEps.length : epNumbersForSeason.size;
+
+      let withLink = 0;
+      let validated = 0;
+      let errCount = 0;
+      let pending = 0;
+
+      for (const eNum of epNumbersForSeason) {
+        const srcs = (sourceMap.get(`${cleanId}:${sNum}:${eNum}`) || []).filter(x => x.enabled);
+        if (srcs.length > 0) {
+          withLink++;
+          const hasOnline = srcs.some(x => x.status === 'online' || x.status === 'active');
+          const allErrored = srcs.every(
+            x =>
+              x.status === 'offline' ||
+              x.status === 'inactive' ||
+              x.status === 'embed_blocked' ||
+              x.status === 'unsupported_format'
+          );
+          if (hasOnline) validated++;
+          else if (allErrored) errCount++;
+          else pending++;
+        }
+      }
+
+      const baseline = Math.max(expected, found);
+      const withoutLink = Math.max(0, baseline - withLink);
+      const difference = Math.max(0, expected - found);
+
+      let status: SeasonComparisonStats['status'] = 'NO_LINKS';
+      if (found === 0 && expected > 0) status = 'MISSING_TMDB_DATA';
+      else if (withLink === 0) status = 'NO_LINKS';
+      else if (withLink >= baseline && errCount === 0) status = 'COMPLETE';
+      else status = 'PARTIAL';
+
+      seasonsStats.push({
+        seasonNumber: sNum,
+        name: official?.name || local?.name || (sNum === 0 ? 'Especiais' : `Temporada ${sNum}`),
+        isSpecial: sNum === 0,
+        expectedEpisodes: expected,
+        foundEpisodes: found,
+        withLink,
+        withoutLink,
+        validatedCount: validated,
+        errorCount: errCount,
+        pendingCount: pending,
+        difference,
+        status
+      });
+
+      totalExpected += expected;
+      totalFound += found;
+      totalWithLink += withLink;
+      totalWithoutLink += withoutLink;
+      totalValidated += validated;
+      totalErrors += errCount;
+    }
+
+    return {
+      tmdbId: cleanId,
+      mediaId: media?.id,
+      title: media?.title || `Série TMDB #${cleanId}`,
+      officialSeasonsCount: officialMap.size > 0 ? officialMap.size : sortedNums.length,
+      localSeasonsCount: localSeasons.length,
+      expectedEpisodes: totalExpected,
+      foundEpisodes: totalFound,
+      withLink: totalWithLink,
+      withoutLink: totalWithoutLink,
+      validatedCount: totalValidated,
+      errorCount: totalErrors,
+      difference: Math.max(0, totalExpected - totalFound),
+      seasons: seasonsStats,
+      generatedAt: new Date().toISOString()
+    };
+  }
+
+  // --- BACKUP CENTER PRO MAX PERSISTENCE HELPERS ---
+  public getBackupConfig(): BackupSettingsConfig {
+    if (!this.data.backupConfig) {
+      this.data.backupConfig = {
+        autoBackupEnabled: false,
+        autoBackupIntervalHours: 24,
+        lastBackupAt: null,
+        lastImportAt: null
+      };
+    }
+    return this.data.backupConfig;
+  }
+
+  public updateBackupConfig(updates: Partial<BackupSettingsConfig>): BackupSettingsConfig {
+    const cur = this.getBackupConfig();
+    this.data.backupConfig = { ...cur, ...updates };
+    this.save();
+    return this.data.backupConfig;
+  }
+
+  public getBackupRecords(): BackupRecord[] {
+    return this.data.backupRecords || [];
+  }
+
+  public saveBackupRecord(record: BackupRecord) {
+    this.data.backupRecords = this.data.backupRecords || [];
+    const idx = this.data.backupRecords.findIndex(r => r.id === record.id);
+    if (idx >= 0) this.data.backupRecords[idx] = record;
+    else this.data.backupRecords.unshift(record);
+    if (this.data.backupRecords.length > 100) {
+      this.data.backupRecords = this.data.backupRecords.slice(0, 100);
+    }
+    this.save();
+  }
+
+  public removeBackupRecord(id: string): BackupRecord | null {
+    this.data.backupRecords = this.data.backupRecords || [];
+    const idx = this.data.backupRecords.findIndex(r => r.id === id);
+    if (idx < 0) return null;
+    const [removed] = this.data.backupRecords.splice(idx, 1);
+    this.save();
+    return removed;
+  }
+
+  public getBackupImportJobs(): BackupImportJob[] {
+    return this.data.backupImportJobs || [];
+  }
+
+  public saveBackupImportJob(job: BackupImportJob) {
+    this.data.backupImportJobs = this.data.backupImportJobs || [];
+    const idx = this.data.backupImportJobs.findIndex(j => j.jobId === job.jobId);
+    if (idx >= 0) this.data.backupImportJobs[idx] = job;
+    else this.data.backupImportJobs.unshift(job);
+    if (this.data.backupImportJobs.length > 50) {
+      this.data.backupImportJobs = this.data.backupImportJobs.slice(0, 50);
+    }
+    this.save();
+  }
+
+  public getFullSafeExportSnapshot(mode: 'full' | 'catalog') {
+    const media = (this.data.media || []).filter(m => !m.deletedAt).map(m => ({ ...m }));
+    const videoSources = (this.data.videoSources || []).map(v => ({ ...v }));
+    const playerSources = (this.data.playerSources || []).map(p => ({ ...p }));
+
+    if (mode === 'catalog') {
+      return {
+        media,
+        videoSources,
+        playerSources,
+        seasonSourceTemplates: { ...(this.data.seasonSourceTemplates || {}) }
+      };
+    }
+
+    // Full mode strictly excludes passwords, hashes, salts, plaintext API keys, and tokens
+    const safeDeveloperApps = (this.data.developerApps || []).map(app => ({
+      id: app.id,
+      name: app.name,
+      description: app.description,
+      status: app.status,
+      plan: app.plan,
+      authorizedDomains: app.authorizedDomains,
+      createdAt: app.createdAt,
+      updatedAt: app.updatedAt
+    }));
+
+    return {
+      media,
+      videoSources,
+      playerSources,
+      seasonSourceTemplates: { ...(this.data.seasonSourceTemplates || {}) },
+      settings: { ...this.data.settings },
+      plansConfig: { ...(this.data.plansConfig || {}) },
+      apiGlobalSettings: { ...(this.data.apiGlobalSettings || {}) },
+      developerApps: safeDeveloperApps,
+      categories: this.getGenresSummary(),
+      importHistory: (this.data.importHistory || []).slice(0, 100)
+    };
+  }
+
+  public getStoreFileSizeBytes(): number {
+    try {
+      if (fs.existsSync(STORE_FILE)) {
+        return fs.statSync(STORE_FILE).size;
+      }
+    } catch {}
+    return 0;
+  }
+
+  public getRawMediaAndSourcesCount() {
+    const activeMedia = (this.data.media || []).filter(m => !m.deletedAt);
+    const movies = activeMedia.filter(m => this.normalizeMediaType(m.type) === 'movie').length;
+    const seriesList = activeMedia.filter(m => this.normalizeMediaType(m.type) === 'tv');
+    let seasons = 0;
+    let episodes = 0;
+    for (const s of seriesList) {
+      const c = this.countSeriesSeasonsAndEpisodes(s);
+      seasons += c.seasonsCount;
+      episodes += c.episodesCount;
+    }
+    return {
+      movies,
+      series: seriesList.length,
+      seasons,
+      episodes,
+      sources: Math.max((this.data.videoSources || []).length, (this.data.playerSources || []).length)
+    };
+  }
+
+  public flushSave() {
+    this.save();
+  }
+
   public getTrashItems() {
     return (this.data.media || []).filter(m => m.deletedAt);
   }
@@ -2427,7 +3353,10 @@ class Database {
     return this.data.media;
   }
 
-  public upsertMediaItem(item: Partial<MediaItem> & { type?: string; tmdbId?: number; id?: string }) {
+  public upsertMediaItem(
+    item: Partial<MediaItem> & { type?: string; tmdbId?: number; id?: string },
+    options?: { replaceCategories?: boolean }
+  ) {
     const normType = this.normalizeMediaType(item.type);
     const existingById = item.id ? this.getMediaById(item.id) : undefined;
     const existingByTmdb =
@@ -2442,6 +3371,17 @@ class Database {
     const resolvedId = existing?.id || item.id || `${canonicalPrefix}-${item.tmdbId || Date.now()}`;
 
     const mergedSeasons = this.mergeSeasonsPreservingEpisodes(existing?.seasons, item.seasons);
+    const existingCats = this.normalizeCategories(existing?.categories);
+    const incomingCats = item.categories !== undefined ? this.normalizeCategories(item.categories) : undefined;
+    const mergedCategories =
+      incomingCats !== undefined
+        ? options?.replaceCategories
+          ? incomingCats
+          : Array.from(new Set([...existingCats, ...incomingCats]))
+        : existing?.categories !== undefined
+          ? existingCats
+          : undefined;
+
     const payload: MediaItem = {
       ...(existing || {}),
       ...item,
@@ -2449,6 +3389,10 @@ class Database {
       type: normType,
       title: item.title || existing?.title || 'Sem título',
       overview: item.overview || existing?.overview || '',
+      categories: mergedCategories,
+      popularity: item.popularity !== undefined ? item.popularity : existing?.popularity,
+      originCountry: item.originCountry !== undefined ? item.originCountry : existing?.originCountry,
+      originalLanguage: item.originalLanguage !== undefined ? item.originalLanguage : existing?.originalLanguage,
       seasons: mergedSeasons,
       published: item.published !== undefined ? item.published : existing?.published !== undefined ? existing.published : true,
       status: item.status || existing?.status || 'ACTIVE',
@@ -2490,12 +3434,16 @@ class Database {
       const matchType = this.normalizeContentType(v.contentType) === normType;
       if (!matchId || !matchType) return false;
       if (normType === 'tv') {
-        if (season !== undefined && v.seasonNumber !== undefined && Number(v.seasonNumber) !== Number(season)) return false;
-        if (episode !== undefined && v.episodeNumber !== undefined && Number(v.episodeNumber) !== Number(episode)) return false;
+        if (season !== undefined && Number(v.seasonNumber) !== Number(season)) return false;
+        if (episode !== undefined && Number(v.episodeNumber) !== Number(episode)) return false;
       }
       return true;
     }).map(v => {
       const classified = classifySourceUrl(v.originalUrl || v.url);
+      const normVer = normalizeVersionType(v.versionType, v.serverName || v.sourceName, v.audioLanguage);
+      const safeLang =
+        v.audioLanguage ||
+        (normVer === 'legendado' ? 'Original' : normVer === 'dublado' ? 'Português' : undefined);
       return {
         id: v.id,
         tmdbId: Number(v.contentId),
@@ -2513,7 +3461,10 @@ class Database {
         priority: typeof v.priority === 'number' ? v.priority : 1,
         enabled: v.enabled !== undefined ? v.enabled : true,
         status: v.status || 'registered',
-        audioLanguage: v.audioLanguage || 'Português',
+        audioLanguage: safeLang,
+        subtitleLanguage: v.subtitleLanguage || undefined,
+        versionType: normVer || v.versionType || undefined,
+        subtitleUrl: v.subtitleUrl || undefined,
         diagnostics: v.diagnostics || classified.diagnostics,
         createdAt: v.createdAt,
         updatedAt: v.updatedAt
@@ -2562,6 +3513,152 @@ class Database {
     const sources = this.sortSources(Array.from(combinedMap.values()));
     return { media: media || null, sources };
   }
+
+  public getRandomPlayableCatalogItem(options?: {
+    type?: 'movie' | 'tv' | 'all' | string;
+    excludeTmdbIds?: number[];
+  }): {
+    item: MediaItem;
+    mediaType: 'movie' | 'tv';
+    seasonNumber?: number;
+    episodeNumber?: number;
+    totalEligible: number;
+  } | null {
+    const rawType = String(options?.type || 'all').toLowerCase();
+    const filterType: 'movie' | 'tv' | 'all' =
+      rawType === 'movie' || rawType === 'filme'
+        ? 'movie'
+        : rawType === 'tv' || rawType === 'series' || rawType === 'serie'
+          ? 'tv'
+          : 'all';
+
+    const isUsableSource = (src: { enabled?: boolean; status?: string; url?: string }) => {
+      if (!src || src.enabled === false) return false;
+      const cleanUrl = String(src.url || '').trim();
+      if (!cleanUrl) return false;
+      const lower = String(src.status || '').toLowerCase();
+      return (
+        lower !== 'offline' &&
+        lower !== 'inactive' &&
+        lower !== 'embed_blocked' &&
+        lower !== 'unsupported_format'
+      );
+    };
+
+    // Index usable sources by `${type}:${tmdbId}` in a single O(S) pass
+    const movieHasSource = new Set<number>();
+    const tvEpisodesByTmdb = new Map<number, Array<{ seasonNumber: number; episodeNumber: number }>>();
+    const tvSeenEpKey = new Set<string>();
+
+    const recordTvEpisode = (tmdbId: number, season?: number, episode?: number) => {
+      const s = this.parseSeasonNum(season, 1);
+      const e = Number(episode || 1);
+      if (!Number.isFinite(s) || !Number.isFinite(e) || s < 0 || e < 1) return;
+      const key = `${tmdbId}:${s}:${e}`;
+      if (tvSeenEpKey.has(key)) return;
+      tvSeenEpKey.add(key);
+      const list = tvEpisodesByTmdb.get(tmdbId) || [];
+      list.push({ seasonNumber: s, episodeNumber: e });
+      tvEpisodesByTmdb.set(tmdbId, list);
+    };
+
+    for (const v of this.data.videoSources || []) {
+      if (!isUsableSource(v)) continue;
+      const tmdbId = Number(v.contentId || 0);
+      if (tmdbId <= 0) continue;
+      const normType = this.normalizeContentType(v.contentType);
+      if (normType === 'movie') {
+        movieHasSource.add(tmdbId);
+      } else {
+        recordTvEpisode(tmdbId, v.seasonNumber, v.episodeNumber);
+      }
+    }
+
+    for (const p of this.data.playerSources || []) {
+      if (!isUsableSource(p)) continue;
+      const tmdbId = Number(p.tmdbId || 0);
+      if (tmdbId <= 0) continue;
+      const normType = this.normalizeContentType(p.type);
+      if (normType === 'movie') {
+        movieHasSource.add(tmdbId);
+      } else {
+        recordTvEpisode(tmdbId, p.season, p.episode);
+      }
+    }
+
+    interface EligibleCandidate {
+      item: MediaItem;
+      mediaType: 'movie' | 'tv';
+      episodes?: Array<{ seasonNumber: number; episodeNumber: number }>;
+    }
+
+    const eligible: EligibleCandidate[] = [];
+    const seenCandidateKey = new Set<string>();
+
+    for (const m of this.data.media || []) {
+      if (!this.isMediaPublished(m)) continue;
+      if (m.status === 'ERROR' || m.importError) continue;
+      const tmdbId = Number(m.tmdbId || 0);
+      if (tmdbId <= 0) continue;
+
+      const mediaType = this.normalizeMediaType(m.type);
+      if (filterType !== 'all' && mediaType !== filterType) continue;
+
+      const candKey = `${mediaType}:${tmdbId}`;
+      if (seenCandidateKey.has(candKey)) continue;
+
+      const directUrl = String((m as any).sourceUrl || (m as any).videoUrl || '').trim();
+
+      if (mediaType === 'movie') {
+        if (!movieHasSource.has(tmdbId) && !directUrl) continue;
+        seenCandidateKey.add(candKey);
+        eligible.push({ item: m, mediaType: 'movie' });
+      } else {
+        const episodes = tvEpisodesByTmdb.get(tmdbId) || [];
+        if (episodes.length === 0 && !directUrl) continue;
+        seenCandidateKey.add(candKey);
+        eligible.push({
+          item: m,
+          mediaType: 'tv',
+          episodes: episodes.length > 0 ? episodes : [{ seasonNumber: 1, episodeNumber: 1 }]
+        });
+      }
+    }
+
+    if (eligible.length === 0) return null;
+
+    const excludeSet = new Set(
+      (options?.excludeTmdbIds || []).map(id => Number(id)).filter(id => Number.isFinite(id) && id > 0)
+    );
+    let pool = eligible.filter(c => !excludeSet.has(Number(c.item.tmdbId)));
+    if (pool.length === 0) {
+      const mostRecentId = options?.excludeTmdbIds?.[0];
+      pool =
+        mostRecentId && eligible.length > 1
+          ? eligible.filter(c => Number(c.item.tmdbId) !== Number(mostRecentId))
+          : eligible;
+    }
+
+    const picked = pool[Math.floor(Math.random() * pool.length)];
+    let seasonNumber: number | undefined;
+    let episodeNumber: number | undefined;
+
+    if (picked.mediaType === 'tv' && picked.episodes && picked.episodes.length > 0) {
+      const s1e1 = picked.episodes.find(ep => ep.seasonNumber === 1 && ep.episodeNumber === 1);
+      const chosenEp = s1e1 || picked.episodes[Math.floor(Math.random() * picked.episodes.length)];
+      seasonNumber = chosenEp.seasonNumber;
+      episodeNumber = chosenEp.episodeNumber;
+    }
+
+    return {
+      item: picked.item,
+      mediaType: picked.mediaType,
+      seasonNumber,
+      episodeNumber,
+      totalEligible: eligible.length
+    };
+  }
+
 
 
   // --- MASS IMPORT ---
@@ -2661,12 +3758,14 @@ class Database {
     description?: string;
     authorizedDomains?: string[];
     plan?: PlanTier;
+    apiType?: 'standard' | 'special';
   }): DeveloperApp {
     this.data.developerApps = this.data.developerApps || [];
     const now = new Date().toISOString();
     const cleanDomains = Array.from(
       new Set((input.authorizedDomains || []).map(d => normalizeDomainEntry(d)).filter(Boolean))
     );
+    const isSpecial = input.apiType === 'special';
     const app: DeveloperApp = {
       id: `app_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
       ownerId: input.ownerId,
@@ -2675,6 +3774,9 @@ class Database {
       description: (input.description || '').trim(),
       status: 'ACTIVE',
       plan: input.plan || 'FREE',
+      apiType: isSpecial ? 'special' : 'standard',
+      specialRequestStatus: isSpecial ? 'pending' : 'none',
+      adsEnabled: !isSpecial,
       authorizedDomains: cleanDomains,
       createdAt: now,
       updatedAt: now
@@ -2686,7 +3788,7 @@ class Database {
 
   public updateDeveloperApp(
     id: string,
-    updates: Partial<Pick<DeveloperApp, 'name' | 'description' | 'status' | 'plan' | 'authorizedDomains'>>
+    updates: Partial<Pick<DeveloperApp, 'name' | 'description' | 'status' | 'plan' | 'authorizedDomains' | 'apiType' | 'specialRequestStatus' | 'adsEnabled'>>
   ): DeveloperApp | null {
     this.data.developerApps = this.data.developerApps || [];
     const idx = this.data.developerApps.findIndex(a => a.id === id);
@@ -2702,12 +3804,46 @@ class Database {
       description: updates.description !== undefined ? updates.description.trim() : current.description,
       status: updates.status !== undefined ? updates.status : current.status,
       plan: updates.plan !== undefined ? updates.plan : current.plan,
+      apiType: updates.apiType !== undefined ? updates.apiType : current.apiType,
+      specialRequestStatus: updates.specialRequestStatus !== undefined ? updates.specialRequestStatus : current.specialRequestStatus,
+      adsEnabled: updates.adsEnabled !== undefined ? updates.adsEnabled : (updates.apiType === 'special' ? false : current.adsEnabled),
       authorizedDomains: cleanDomains,
       updatedAt: new Date().toISOString()
     };
     this.data.developerApps[idx] = updated;
     this.save();
     return updated;
+  }
+
+  public requestSpecialApi(appId: string): DeveloperApp | null {
+    return this.updateDeveloperApp(appId, {
+      apiType: 'special',
+      specialRequestStatus: 'pending',
+      adsEnabled: false
+    });
+  }
+
+  public updateSpecialApiStatus(appId: string, status: 'approved' | 'rejected' | 'suspended' | 'standard'): DeveloperApp | null {
+    if (status === 'standard') {
+      return this.updateDeveloperApp(appId, {
+        apiType: 'standard',
+        specialRequestStatus: 'none',
+        adsEnabled: true
+      });
+    }
+    const reqStatus = status === 'approved' ? 'approved' : status === 'rejected' ? 'rejected' : 'suspended';
+    const isApproved = status === 'approved';
+    return this.updateDeveloperApp(appId, {
+      apiType: isApproved ? 'special' : 'standard',
+      specialRequestStatus: reqStatus,
+      adsEnabled: !isApproved
+    });
+  }
+
+  public getSpecialDeveloperApps(): DeveloperApp[] {
+    return (this.data.developerApps || []).filter(
+      a => a.apiType === 'special' || (a.specialRequestStatus && a.specialRequestStatus !== 'none')
+    );
   }
 
   public deleteDeveloperApp(id: string): boolean {
@@ -2953,6 +4089,419 @@ class Database {
       recentEvents: events.slice(0, 30),
       authorizedDomains
     };
+  }
+
+  public async getVersionSlotsForContent(params: {
+    contentId: number;
+    contentType: string;
+    seasonNumber?: number;
+    episodeNumber?: number;
+  }) {
+    const cleanId = Number(params.contentId);
+    const normType = this.normalizeContentType(params.contentType);
+    const sNum = normType === 'tv' ? this.parseSeasonNum(params.seasonNumber, 1) : undefined;
+    const eNum = normType === 'tv' ? Math.max(1, Number(params.episodeNumber || 1)) : undefined;
+
+    const { sources: localSources } = this.getMediaAndSources(cleanId, normType, sNum, eNum);
+    const vSources = await this.getVideoSources({
+      contentId: cleanId,
+      contentType: normType,
+      seasonNumber: sNum,
+      episodeNumber: eNum
+    });
+
+    const byUrl = new Map<string, any>();
+    for (const s of localSources) {
+      byUrl.set((s.originalUrl || s.url || '').trim(), s);
+    }
+    for (const v of vSources) {
+      const normVer = normalizeVersionType(v.versionType, v.serverName || v.sourceName, v.audioLanguage);
+      byUrl.set((v.originalUrl || v.url || '').trim(), {
+        ...v,
+        tmdbId: Number(v.contentId),
+        type: normType,
+        season: v.seasonNumber,
+        episode: v.episodeNumber,
+        label: v.serverName || v.sourceName || v.quality || 'Servidor Principal',
+        versionType: normVer || v.versionType,
+        audioLanguage:
+          v.audioLanguage ||
+          (normVer === 'legendado' ? 'Original' : normVer === 'dublado' ? 'Português' : undefined)
+      });
+    }
+
+    const all = this.sortSources(Array.from(byUrl.values()));
+    const dublado: any[] = [];
+    const legendado: any[] = [];
+    const legacyOrOther: any[] = [];
+
+    for (const src of all) {
+      const dub = isSourceDublado(src);
+      const leg = isSourceLegendado(src);
+      if (dub && !leg) {
+        dublado.push(src);
+      } else if (leg && !dub) {
+        legendado.push(src);
+      } else if (dub && leg) {
+        // Explicit versionType takes priority if both heuristics somehow match
+        const norm = normalizeVersionType(src.versionType);
+        if (norm === 'legendado') legendado.push(src);
+        else if (norm === 'dublado') dublado.push(src);
+        else legacyOrOther.push(src);
+      } else {
+        legacyOrOther.push(src);
+      }
+    }
+
+    const scopeMarker = normType === 'tv' ? `[TMDB ${cleanId} T${sNum}E${eNum}]` : `[TMDB ${cleanId}]`;
+    const history = (this.data.auditLogs || [])
+      .filter(log => {
+        const details = String(log?.details || '');
+        if (!details.includes(`[TMDB ${cleanId}`)) return false;
+        if (normType === 'tv') {
+          return details.includes(scopeMarker) || details.includes(`[TMDB ${cleanId}]`);
+        }
+        return details.includes(`[TMDB ${cleanId}]`);
+      })
+      .slice(0, 20);
+
+    return {
+      contentId: cleanId,
+      contentType: normType,
+      seasonNumber: sNum,
+      episodeNumber: eNum,
+      dublado: {
+        primary: dublado[0] || null,
+        sources: dublado
+      },
+      legendado: {
+        primary: legendado[0] || null,
+        sources: legendado
+      },
+      legacyOrOther,
+      allSources: all,
+      history
+    };
+  }
+
+  public async upsertVersionSourceSlot(input: {
+    contentId: number;
+    contentType: string;
+    seasonNumber?: number;
+    episodeNumber?: number;
+    version: 'dublado' | 'legendado';
+    url: string;
+    serverName?: string;
+    quality?: string;
+    format?: string;
+    enabled?: boolean;
+    isPrimary?: boolean;
+    status?: string;
+    verificationResult?: string;
+    diagnostics?: any;
+    sourceId?: string;
+    replaceExisting?: boolean;
+    adminEmail?: string;
+  }) {
+    const cleanId = Number(input.contentId);
+    const normType = this.normalizeContentType(input.contentType);
+    const sNum = normType === 'tv' ? this.parseSeasonNum(input.seasonNumber, 1) : undefined;
+    const eNum = normType === 'tv' ? Math.max(1, Number(input.episodeNumber || 1)) : undefined;
+    const cleanUrl = String(input.url || '').trim();
+    const classified = classifySourceUrl(cleanUrl);
+    const canonicalUrl = classified.originalUrl || cleanUrl;
+    const audioLang = input.version === 'dublado' ? 'Português' : 'Original';
+    const defaultServer = input.version === 'dublado' ? 'Servidor Dublado' : 'Servidor Legendado';
+
+    const slots = await this.getVersionSlotsForContent({
+      contentId: cleanId,
+      contentType: normType,
+      seasonNumber: sNum,
+      episodeNumber: eNum
+    });
+
+    const oppositeList = input.version === 'dublado' ? slots.legendado.sources : slots.dublado.sources;
+    const duplicateInOpposite = oppositeList.find(
+      s => (s.originalUrl || s.url || '').trim() === canonicalUrl
+    );
+    const duplicateInLegacy = slots.legacyOrOther.find(
+      s => (s.originalUrl || s.url || '').trim() === canonicalUrl && s.id !== input.sourceId
+    );
+    const duplicateWarning = duplicateInOpposite
+      ? `Atenção: esta mesma URL já está cadastrada na versão ${input.version === 'dublado' ? 'Legendada' : 'Dublada'}.`
+      : duplicateInLegacy
+      ? 'Atenção: esta URL já existe numa fonte legada deste conteúdo.'
+      : undefined;
+
+    const currentSlotList = input.version === 'dublado' ? slots.dublado.sources : slots.legendado.sources;
+    const exactUrlMatch = currentSlotList.find(
+      s => (s.originalUrl || s.url || '').trim() === canonicalUrl
+    );
+    const targetExisting = input.sourceId
+      ? currentSlotList.find(s => s.id === input.sourceId || `src-${s.id}` === input.sourceId) ||
+        slots.allSources.find(s => s.id === input.sourceId)
+      : input.replaceExisting === false
+      ? exactUrlMatch
+      : currentSlotList[0];
+
+    let saved: VideoSource;
+    let actionLabel: 'criada' | 'atualizada';
+
+    if (targetExisting && (input.replaceExisting !== false || input.sourceId || exactUrlMatch)) {
+      const targetId = String(targetExisting.id || '').startsWith('src-') &&
+        (this.data.videoSources || []).some(v => v.id === String(targetExisting.id).replace(/^src-/, ''))
+        ? String(targetExisting.id).replace(/^src-/, '')
+        : String(targetExisting.id);
+
+      saved = await this.updateVideoSource(targetId, {
+        url: canonicalUrl,
+        originalUrl: canonicalUrl,
+        sourceKind: classified.sourceKind,
+        format: (input.format && input.format !== 'auto' ? input.format : classified.suggestedFormat) as any,
+        serverName: input.serverName?.trim() || targetExisting.serverName || defaultServer,
+        quality: input.quality || targetExisting.quality || '1080p',
+        versionType: input.version,
+        audioLanguage: audioLang,
+        enabled: input.enabled !== undefined ? input.enabled : true,
+        isPrimary: input.isPrimary !== undefined ? input.isPrimary : targetExisting.isPrimary,
+        status: (input.status as any) || 'registered',
+        verificationResult: input.verificationResult,
+        diagnostics: input.diagnostics || classified.diagnostics
+      });
+      actionLabel = 'atualizada';
+    } else {
+      saved = await this.addVideoSource({
+        contentId: cleanId,
+        contentType: normType,
+        seasonNumber: sNum,
+        episodeNumber: eNum,
+        url: canonicalUrl,
+        originalUrl: canonicalUrl,
+        sourceKind: classified.sourceKind,
+        format: (input.format && input.format !== 'auto' ? input.format : classified.suggestedFormat) as any,
+        serverName: input.serverName?.trim() || (currentSlotList.length > 0 ? `${defaultServer} #${currentSlotList.length + 1}` : defaultServer),
+        quality: input.quality || '1080p',
+        versionType: input.version,
+        audioLanguage: audioLang,
+        enabled: input.enabled !== undefined ? input.enabled : true,
+        isPrimary: input.isPrimary ?? (slots.allSources.length === 0),
+        priority: currentSlotList.length + (input.version === 'dublado' ? 1 : 2),
+        status: (input.status as any) || 'registered',
+        verificationResult: input.verificationResult,
+        diagnostics: input.diagnostics || classified.diagnostics
+      });
+      actionLabel = 'criada';
+    }
+
+    const scopeTag = normType === 'tv' ? `[TMDB ${cleanId} T${sNum}E${eNum}]` : `[TMDB ${cleanId}]`;
+    const versionTitle = input.version === 'dublado' ? 'Versão Dublada' : 'Versão Legendada';
+    await this.addAuditLog(
+      input.adminEmail || ADMIN_EMAIL,
+      actionLabel === 'atualizada' ? 'VERSION_SLOT_UPDATED' : 'VERSION_SLOT_CREATED',
+      'SUCCESS',
+      `[VERSÃO] ${scopeTag} ${versionTitle} ${actionLabel}: ${canonicalUrl}`
+    );
+
+    const refreshed = await this.getVersionSlotsForContent({
+      contentId: cleanId,
+      contentType: normType,
+      seasonNumber: sNum,
+      episodeNumber: eNum
+    });
+
+    return {
+      saved,
+      action: actionLabel,
+      duplicateWarning,
+      slots: refreshed
+    };
+  }
+
+  public async deleteVersionSourceSlot(params: {
+    contentId: number;
+    contentType: string;
+    version: 'dublado' | 'legendado';
+    sourceId?: string;
+    seasonNumber?: number;
+    episodeNumber?: number;
+    adminEmail?: string;
+  }) {
+    const cleanId = Number(params.contentId);
+    const normType = this.normalizeContentType(params.contentType);
+    const sNum = normType === 'tv' ? this.parseSeasonNum(params.seasonNumber, 1) : undefined;
+    const eNum = normType === 'tv' ? Math.max(1, Number(params.episodeNumber || 1)) : undefined;
+
+    const slots = await this.getVersionSlotsForContent({
+      contentId: cleanId,
+      contentType: normType,
+      seasonNumber: sNum,
+      episodeNumber: eNum
+    });
+
+    const list = params.version === 'dublado' ? slots.dublado.sources : slots.legendado.sources;
+    const toRemove = params.sourceId
+      ? list.filter(s => s.id === params.sourceId || `src-${s.id}` === params.sourceId)
+      : list;
+
+    let removedCount = 0;
+    for (const src of toRemove) {
+      const rawId = String(src.id || '');
+      const videoId = rawId.startsWith('src-') && (this.data.videoSources || []).some(v => v.id === rawId.replace(/^src-/, ''))
+        ? rawId.replace(/^src-/, '')
+        : rawId;
+      await this.deleteVideoSource(videoId, { skipSave: true });
+      removedCount++;
+    }
+    if (removedCount > 0) {
+      this.save();
+    }
+
+    const scopeTag = normType === 'tv' ? `[TMDB ${cleanId} T${sNum}E${eNum}]` : `[TMDB ${cleanId}]`;
+    const versionTitle = params.version === 'dublado' ? 'Versão Dublada' : 'Versão Legendada';
+    await this.addAuditLog(
+      params.adminEmail || ADMIN_EMAIL,
+      'VERSION_SLOT_REMOVED',
+      'SUCCESS',
+      `[VERSÃO] ${scopeTag} ${versionTitle} removida (${removedCount} fonte${removedCount === 1 ? '' : 's'}).`
+    );
+
+    const refreshed = await this.getVersionSlotsForContent({
+      contentId: cleanId,
+      contentType: normType,
+      seasonNumber: sNum,
+      episodeNumber: eNum
+    });
+
+    return {
+      removedCount,
+      slots: refreshed
+    };
+  }
+
+  public getSeasonDiscoveryJobs(): SeasonDiscoveryJob[] {
+    return this.data.seasonDiscoveryJobs || [];
+  }
+
+  public getSeasonDiscoveryJob(jobId: string): SeasonDiscoveryJob | undefined {
+    return (this.data.seasonDiscoveryJobs || []).find(j => j.jobId === jobId);
+  }
+
+  public saveSeasonDiscoveryJob(job: SeasonDiscoveryJob): SeasonDiscoveryJob {
+    this.data.seasonDiscoveryJobs = this.data.seasonDiscoveryJobs || [];
+    const idx = this.data.seasonDiscoveryJobs.findIndex(j => j.jobId === job.jobId);
+    const updated = { ...job, updatedAt: new Date().toISOString() };
+    if (idx >= 0) {
+      this.data.seasonDiscoveryJobs[idx] = updated;
+    } else {
+      this.data.seasonDiscoveryJobs.unshift(updated);
+    }
+    if (this.data.seasonDiscoveryJobs.length > 25) {
+      this.data.seasonDiscoveryJobs = this.data.seasonDiscoveryJobs.slice(0, 25);
+    }
+    this.save();
+    return updated;
+  }
+
+  // --- AD CAMPAIGN MANAGEMENT METHODS ---
+  public getAdCampaigns(): AdCampaign[] {
+    return this.data.adCampaigns || [];
+  }
+
+  public getAdCampaignById(id: string): AdCampaign | undefined {
+    return (this.data.adCampaigns || []).find(c => c.id === id);
+  }
+
+  public createAdCampaign(input: Omit<AdCampaign, 'id' | 'impressions' | 'clicks' | 'createdAt' | 'updatedAt'>): AdCampaign {
+    this.data.adCampaigns = this.data.adCampaigns || [];
+    const campaign: AdCampaign = {
+      id: `ad-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      impressions: 0,
+      clicks: 0,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      ...input
+    };
+    this.data.adCampaigns.unshift(campaign);
+    this.save();
+    return campaign;
+  }
+
+  public updateAdCampaign(id: string, updates: Partial<AdCampaign>): AdCampaign | null {
+    this.data.adCampaigns = this.data.adCampaigns || [];
+    const idx = this.data.adCampaigns.findIndex(c => c.id === id);
+    if (idx < 0) return null;
+    const current = this.data.adCampaigns[idx];
+    const updated: AdCampaign = {
+      ...current,
+      ...updates,
+      id: current.id,
+      updatedAt: new Date().toISOString()
+    };
+    this.data.adCampaigns[idx] = updated;
+    this.save();
+    return updated;
+  }
+
+  public deleteAdCampaign(id: string): boolean {
+    this.data.adCampaigns = this.data.adCampaigns || [];
+    const before = this.data.adCampaigns.length;
+    this.data.adCampaigns = this.data.adCampaigns.filter(c => c.id !== id);
+    if (this.data.adCampaigns.length === before) return false;
+    this.save();
+    return true;
+  }
+
+  public duplicateAdCampaign(id: string): AdCampaign | null {
+    const orig = this.getAdCampaignById(id);
+    if (!orig) return null;
+    return this.createAdCampaign({
+      name: `${orig.name} (Cópia)`,
+      type: orig.type,
+      displayLocation: [...orig.displayLocation],
+      codeOrLink: orig.codeOrLink,
+      status: 'DISABLED',
+      frequency: { ...orig.frequency },
+      startDate: orig.startDate,
+      endDate: orig.endDate,
+      allowedDevices: [...orig.allowedDevices],
+      priority: orig.priority,
+      description: orig.description,
+      createdBy: orig.createdBy
+    });
+  }
+
+  public recordAdImpression(id: string) {
+    const c = this.getAdCampaignById(id);
+    if (c) {
+      c.impressions = (c.impressions || 0) + 1;
+      this.save();
+    }
+  }
+
+  public recordAdClick(id: string) {
+    const c = this.getAdCampaignById(id);
+    if (c) {
+      c.clicks = (c.clicks || 0) + 1;
+      this.save();
+    }
+  }
+
+  // --- USER ADMIN MANAGEMENT METHODS ---
+  public updateUserAdminStatus(userIdOrEmail: string, updates: {
+    status?: 'active' | 'suspended' | 'blocked' | 'banned';
+    adsDistributionEnabled?: boolean;
+    suspensionReason?: string;
+    suspensionExpiresAt?: string;
+  }): StoreUser | null {
+    this.data.users = this.data.users || [];
+    const user = this.data.users.find(u => u.id === userIdOrEmail || u.email === userIdOrEmail);
+    if (!user) return null;
+    if (updates.status !== undefined) user.status = updates.status;
+    if (updates.adsDistributionEnabled !== undefined) user.adsDistributionEnabled = updates.adsDistributionEnabled;
+    if (updates.suspensionReason !== undefined) user.suspensionReason = updates.suspensionReason;
+    if (updates.suspensionExpiresAt !== undefined) user.suspensionExpiresAt = updates.suspensionExpiresAt;
+    this.save();
+    return user;
   }
 }
 

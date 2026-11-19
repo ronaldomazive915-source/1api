@@ -90,6 +90,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return '/movies';
       case 'series':
         return '/series';
+      case 'animes':
+        return '/animes';
+      case 'doramas':
+        return '/doramas';
       case 'search':
         return '/search';
       case 'media_detail':
@@ -129,6 +133,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return '/resources';
       case 'faq':
         return '/faq';
+      case 'status':
+        return '/status';
       case 'embed': {
         if (wParams?.tmdbId) {
           const normalizedType = wParams.type === 'series' || wParams.type === 'tv' ? 'tv' : 'movie';
@@ -168,6 +174,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (pathname.startsWith('/admin')) return { view: 'admin', selectedMediaId: null, watchParams: null };
     if (pathname.startsWith('/movies') || pathname.startsWith('/catalogo')) return { view: 'movies', selectedMediaId: null, watchParams: null };
     if (pathname.startsWith('/series')) return { view: 'series', selectedMediaId: null, watchParams: null };
+    if (pathname.startsWith('/animes')) return { view: 'animes', selectedMediaId: null, watchParams: null };
+    if (pathname.startsWith('/doramas')) return { view: 'doramas', selectedMediaId: null, watchParams: null };
     if (pathname.startsWith('/search')) return { view: 'search', selectedMediaId: null, watchParams: null };
     if (pathname.startsWith('/my-list')) return { view: 'my_list', selectedMediaId: null, watchParams: null };
     if (pathname.startsWith('/history')) return { view: 'history', selectedMediaId: null, watchParams: null };
@@ -177,6 +185,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (pathname.startsWith('/plans')) return { view: 'plans', selectedMediaId: null, watchParams: null };
     if (pathname.startsWith('/resources') || pathname.startsWith('/sdk')) return { view: 'resources', selectedMediaId: null, watchParams: null };
     if (pathname.startsWith('/faq')) return { view: 'faq', selectedMediaId: null, watchParams: null };
+    if (pathname.startsWith('/status') || pathname.startsWith('/saude')) return { view: 'status', selectedMediaId: null, watchParams: null };
 
     if (pathname.startsWith('/media/') || pathname.startsWith('/movie/') || pathname.startsWith('/tv/')) {
       const parts = pathname.split('/');

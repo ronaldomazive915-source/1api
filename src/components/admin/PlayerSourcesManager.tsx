@@ -18,11 +18,22 @@ import {
   Sparkles,
   Link as LinkIcon,
   Eye,
-  Star
+  Star,
+  X
 } from 'lucide-react';
 import { api } from '../../lib/api.js';
 import { PlayerSource, VideoFormatType } from '../../types.js';
 import { OFFICIAL_BASE_URL } from '../../lib/siteConfig.js';
+import { classifySourceUrl } from '../../lib/sourceClassification.js';
+import { RonycinePlayer } from '../player/RonycinePlayer.js';
+import { ErrorBoundary } from '../ErrorBoundary.js';
+import {
+  AUDIO_LANGUAGE_OPTIONS,
+  SOURCE_QUALITY_OPTIONS,
+  VERSION_TYPE_OPTIONS,
+  formatSourceOrganizedLabel,
+  isPresetAudioLanguage
+} from '../../lib/sourceMetadata.js';
 
 export const PlayerSourcesManager: React.FC = () => {
   const [sources, setSources] = useState<PlayerSource[]>([]);
@@ -42,7 +53,10 @@ export const PlayerSourcesManager: React.FC = () => {
     url: '',
     provider: 'custom',
     label: '',
-    quality: 'Auto',
+    audioLanguage: 'Português',
+    versionType: 'dublado',
+    subtitleUrl: '',
+    quality: '1080p',
     isPrimary: true
   });
 
@@ -55,6 +69,10 @@ export const PlayerSourcesManager: React.FC = () => {
 
   // Preview Modal
   const [previewSource, setPreviewSource] = useState<PlayerSource | null>(null);
+  const [previewDiag, setPreviewDiag] = useState<{
+    status: 'playing' | 'confirmed' | 'format_error' | 'connection_error';
+    message: string;
+  }>({ status: 'playing', message: 'A inicializar stream...' });
 
   const loadSources = async () => {
     setLoading(true);
@@ -109,6 +127,9 @@ export const PlayerSourcesManager: React.FC = () => {
         url: formData.url,
         provider: formData.provider || 'custom',
         label: formData.label || (formData.isPrimary ? 'Servidor Principal' : 'Servidor Alternativo'),
+        audioLanguage: formData.audioLanguage.trim() || 'Português',
+        versionType: formData.versionType,
+        subtitleUrl: formData.subtitleUrl.trim() || undefined,
         quality: formData.quality,
         isPrimary: formData.isPrimary,
         status: 'active'
@@ -125,7 +146,10 @@ export const PlayerSourcesManager: React.FC = () => {
         url: '',
         provider: 'custom',
         label: '',
-        quality: 'Auto',
+        audioLanguage: 'Português',
+        versionType: 'dublado',
+        subtitleUrl: '',
+        quality: '1080p',
         isPrimary: true
       });
       setTestResult(null);
@@ -309,6 +333,69 @@ export const PlayerSourcesManager: React.FC = () => {
               >
                 <option value="m3u8">M3U8 / HLS</option>
                 <option value="mp4">MP4 / Vídeo Direto</option>
+                <option value="dash">MPD / DASH</option>
+                <option value="webm">WebM Direto</option>
+                <option value="php_endpoint">Endpoint PHP</option>
+                <option value="embed">Embed / Iframe</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-zinc-400 mb-1">Tipo de Versão</label>
+              <select
+                value={formData.versionType}
+                onChange={e => setFormData({ ...formData, versionType: e.target.value })}
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs text-white focus:border-[#E50914] focus:outline-none"
+              >
+                {VERSION_TYPE_OPTIONS.map(opt => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-zinc-400 mb-1">Idioma</label>
+              <select
+                value={isPresetAudioLanguage(formData.audioLanguage) ? formData.audioLanguage || 'Português' : 'Outro'}
+                onChange={e => {
+                  const val = e.target.value;
+                  setFormData({ ...formData, audioLanguage: val === 'Outro' ? '' : val });
+                }}
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs text-white focus:border-[#E50914] focus:outline-none"
+              >
+                {AUDIO_LANGUAGE_OPTIONS.map(lang => (
+                  <option key={lang} value={lang}>
+                    {lang}
+                  </option>
+                ))}
+              </select>
+              {!isPresetAudioLanguage(formData.audioLanguage) && (
+                <input
+                  type="text"
+                  placeholder="Digite o idioma..."
+                  value={formData.audioLanguage}
+                  onChange={e => setFormData({ ...formData, audioLanguage: e.target.value })}
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-2.5 text-xs text-white focus:border-[#E50914] focus:outline-none mt-1.5"
+                />
+              )}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div>
+              <label className="block text-xs font-semibold text-zinc-400 mb-1">Qualidade</label>
+              <select
+                value={formData.quality}
+                onChange={e => setFormData({ ...formData, quality: e.target.value })}
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs text-white focus:border-[#E50914] focus:outline-none"
+              >
+                {SOURCE_QUALITY_OPTIONS.map(q => (
+                  <option key={q} value={q}>
+                    {q}
+                  </option>
+                ))}
               </select>
             </div>
 
@@ -323,18 +410,29 @@ export const PlayerSourcesManager: React.FC = () => {
               />
             </div>
 
-            <div className="flex items-center space-x-2 pt-6">
+            <div>
+              <label className="block text-xs font-semibold text-zinc-400 mb-1">Legenda Externa (.srt / .vtt) — Opcional</label>
               <input
-                type="checkbox"
-                id="isPrimary"
-                checked={formData.isPrimary}
-                onChange={e => setFormData({ ...formData, isPrimary: e.target.checked })}
-                className="w-4 h-4 rounded bg-zinc-950 border-zinc-800 text-[#E50914] focus:ring-0"
+                type="url"
+                placeholder="https://.../legenda.srt ou .vtt"
+                value={formData.subtitleUrl}
+                onChange={e => setFormData({ ...formData, subtitleUrl: e.target.value })}
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs text-white font-mono focus:border-[#E50914] focus:outline-none"
               />
-              <label htmlFor="isPrimary" className="text-xs font-medium text-zinc-300">
-                Definir como Servidor Principal
-              </label>
             </div>
+          </div>
+
+          <div className="flex items-center space-x-2">
+            <input
+              type="checkbox"
+              id="isPrimary"
+              checked={formData.isPrimary}
+              onChange={e => setFormData({ ...formData, isPrimary: e.target.checked })}
+              className="w-4 h-4 rounded bg-zinc-950 border-zinc-800 text-[#E50914] focus:ring-0"
+            />
+            <label htmlFor="isPrimary" className="text-xs font-medium text-zinc-300">
+              Definir como Servidor Principal
+            </label>
           </div>
 
           <div className="flex justify-end space-x-2 pt-2">
@@ -444,7 +542,13 @@ export const PlayerSourcesManager: React.FC = () => {
                       </span>
                     </td>
 
-                    <td className="p-4 font-medium text-white">{source.label || 'Personalizado'}</td>
+                    <td className="p-4 font-medium text-white">
+                      <div>{source.label || 'Personalizado'}</div>
+                      <div className="text-[10px] text-zinc-400 font-semibold mt-0.5">
+                        {formatSourceOrganizedLabel(source)}
+                        {source.subtitleUrl ? ' · Legenda Externa' : ''}
+                      </div>
+                    </td>
 
                     <td className="p-4 font-mono text-[11px] text-zinc-400 truncate max-w-xs">
                       {source.url}
@@ -461,7 +565,11 @@ export const PlayerSourcesManager: React.FC = () => {
                         </button>
 
                         <button
-                          onClick={() => setPreviewSource(source)}
+                          type="button"
+                          onClick={() => {
+                            setPreviewDiag({ status: 'playing', message: 'A inicializar stream...' });
+                            setPreviewSource(source);
+                          }}
                           className="p-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-xl transition-colors"
                           title="Preview no RONYCINE Player"
                         >
@@ -481,6 +589,90 @@ export const PlayerSourcesManager: React.FC = () => {
                 ))}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+      {/* Preview Player Modal */}
+      {previewSource && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/90 backdrop-blur-sm">
+          <div className="w-full max-w-4xl bg-[#0c0c0c] border border-white/15 rounded-2xl overflow-hidden shadow-2xl">
+            <div className="p-4 border-b border-white/10 flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h4 className="text-sm font-black text-white uppercase truncate">
+                    Preview Player — {previewSource.label || previewSource.provider || 'Fonte'}
+                  </h4>
+                  <span
+                    className={`px-2 py-0.5 rounded text-[10px] font-black uppercase ${
+                      previewDiag.status === 'confirmed'
+                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                        : previewDiag.status === 'format_error' || previewDiag.status === 'connection_error'
+                          ? 'bg-red-500/20 text-red-300 border border-[#E50914]/40'
+                          : 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+                    }`}
+                  >
+                    {previewDiag.status === 'confirmed'
+                      ? 'REPRODUÇÃO CONFIRMADA'
+                      : previewDiag.status === 'format_error'
+                        ? 'ERRO DE FORMATO'
+                        : previewDiag.status === 'connection_error'
+                          ? 'ERRO DE CONEXÃO'
+                          : 'TESTE EM ANDAMENTO'}
+                  </span>
+                </div>
+                <p className="text-[11px] font-mono text-zinc-400 truncate mt-0.5">{previewSource.url}</p>
+                <p className="text-[11px] text-zinc-300 mt-0.5">{previewDiag.message}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPreviewSource(null)}
+                className="p-2 text-zinc-400 hover:text-white rounded-lg"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="aspect-video bg-black">
+              <ErrorBoundary fallbackTitle="Erro ao pré-visualizar fonte" resetKey={previewSource.id || previewSource.url}>
+                <RonycinePlayer
+                  sources={[
+                    {
+                      id: previewSource.id,
+                      url: previewSource.url,
+                      originalUrl: previewSource.url,
+                      format: previewSource.format || classifySourceUrl(previewSource.url).suggestedFormat,
+                      sourceKind: classifySourceUrl(previewSource.url).sourceKind,
+                      serverName: previewSource.label || previewSource.provider || 'Player Source',
+                      audioLanguage: previewSource.audioLanguage,
+                      versionType: previewSource.versionType,
+                      subtitleUrl: previewSource.subtitleUrl,
+                      quality: previewSource.quality,
+                      diagnostics: previewSource.diagnostics,
+                      isPrimary: previewSource.isPrimary
+                    }
+                  ]}
+                  title={previewSource.label || `TMDB ${previewSource.tmdbId || ''}`}
+                  autoplay={true}
+                  onPlaybackEvent={(status, message) => {
+                    if (status === 'STARTED') {
+                      setPreviewDiag({
+                        status: 'confirmed',
+                        message: 'Stream inicializado com sucesso no player.'
+                      });
+                    } else {
+                      const lower = (message || '').toLowerCase();
+                      setPreviewDiag({
+                        status:
+                          lower.includes('formato') || lower.includes('descodificar') || lower.includes('html')
+                            ? 'format_error'
+                            : 'connection_error',
+                        message: message || 'Não foi possível reproduzir esta fonte.'
+                      });
+                    }
+                  }}
+                />
+              </ErrorBoundary>
+            </div>
           </div>
         </div>
       )}

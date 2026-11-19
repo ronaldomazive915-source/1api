@@ -40,14 +40,23 @@ import {
   Trash2,
   ChevronDown,
   ChevronRight,
-  HardDrive
+  HardDrive,
+  Wand2,
+  Heart,
+  Flame,
+  Link2,
+  Megaphone
 } from 'lucide-react';
-import { api } from '../lib/api.js';
+import { api, CATALOG_UPDATED_EVENT } from '../lib/api.js';
 import { useAuth } from '../context/AuthContext.js';
-import { CatalogStats, AuditLog, User } from '../types.js';
+import { CatalogStats, AuditLog, User, TrendingSectionResponse } from '../types.js';
 import { TmdbImporter } from '../components/admin/TmdbImporter.js';
+import { SmartContentImporter } from '../components/admin/SmartContentImporter.js';
+import { SmartLinkImporter } from '../components/admin/SmartLinkImporter.js';
 import { CatalogManager } from '../components/admin/CatalogManager.js';
 import { CategoriesManager } from '../components/admin/CategoriesManager.js';
+import { AdsManager } from '../components/admin/AdsManager.js';
+import { UsersManager } from '../components/admin/UsersManager.js';
 import { motion, AnimatePresence } from 'motion/react';
 
 // Modular Sub-Views
@@ -64,6 +73,8 @@ import { TrashView } from '../components/admin/TrashView.js';
 import { SystemHealthView } from '../components/admin/SystemHealthView.js';
 import { SeriesImporterPro } from '../components/admin/SeriesImporterPro.js';
 import { SourceDiagnosticsView } from '../components/admin/SourceDiagnosticsView.js';
+import { ServerControlCenter } from '../components/admin/ServerControlCenter.js';
+import { ConnectionAnalyticsView } from '../components/admin/ConnectionAnalyticsView.js';
 import {
   AdminDevelopersTab,
   AdminMonitoringTab,
@@ -144,11 +155,20 @@ export const AdminView: React.FC<AdminViewProps> = ({ initialTab }) => {
   }, []);
 
   useEffect(() => {
-    if (isAdmin) {
+    if (isAdmin || isFounder) {
       loadDashboardData();
       checkTmdbStatus();
     }
-  }, [isAdmin, activeTab]);
+  }, [isAdmin, isFounder, activeTab]);
+
+  useEffect(() => {
+    if (!isAdmin && !isFounder) return;
+    const handleCatalogUpdate = () => {
+      loadDashboardData();
+    };
+    window.addEventListener(CATALOG_UPDATED_EVENT, handleCatalogUpdate);
+    return () => window.removeEventListener(CATALOG_UPDATED_EVENT, handleCatalogUpdate);
+  }, [isAdmin, isFounder, activeTab]);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
@@ -257,25 +277,30 @@ export const AdminView: React.FC<AdminViewProps> = ({ initialTab }) => {
     }
   };
 
-  // Structured Sidebar Menu - 5 Requested Categories
+  // Structured Sidebar Menu
   const menuSections = [
     {
       title: 'Principal',
       items: [
-        { id: 'overview', label: 'Dashboard', icon: LayoutDashboard },
-        { id: 'activity', label: 'Visão Geral / Atividade', icon: Compass },
+        { id: 'overview', label: 'Visão Geral', icon: LayoutDashboard },
+        { id: 'trending_admin', label: 'Tendências', icon: Flame },
         { id: 'stats', label: 'Estatísticas', icon: BarChart3 },
+        { id: 'activity', label: 'Atividade', icon: Compass },
       ]
     },
     {
-      title: 'Catálogo',
+      title: 'Catálogo & Importação',
       items: [
+        { id: 'smart_link_import', label: 'Importação Inteligente PRO', icon: Link2 },
+        { id: 'smart_import', label: 'Importar Conteúdo', icon: Wand2 },
         { id: 'catalog_movies', label: 'Filmes', icon: Film },
         { id: 'catalog_series', label: 'Séries', icon: Tv },
-        { id: 'import_series', label: 'Importar Séries', icon: Tv },
-        { id: 'import_single', label: 'Importar por TMDB ID', icon: PlusCircle },
+        { id: 'catalog_animes', label: 'Animes', icon: Sparkles },
+        { id: 'catalog_doramas', label: 'Doramas', icon: Heart },
+        { id: 'import_series', label: 'Episódios PRO', icon: Layers },
+        { id: 'import_single', label: 'Importar TMDB ID', icon: PlusCircle },
         { id: 'import_mass', label: 'Importação em Massa', icon: Sparkles },
-        { id: 'import_m3u', label: 'Importar Lista M3U', icon: FileText },
+        { id: 'import_m3u', label: 'Listas M3U', icon: FileText },
         { id: 'categories', label: 'Categorias', icon: FolderHeart },
         { id: 'tv_live', label: 'TV ao Vivo', icon: Radio },
       ]
@@ -283,14 +308,17 @@ export const AdminView: React.FC<AdminViewProps> = ({ initialTab }) => {
     {
       title: 'Fontes e Player',
       items: [
-        { id: 'video_sources', label: 'Gestão de Fontes', icon: Server },
+        { id: 'server_control', label: 'SERVIDOR', icon: Server },
+        { id: 'video_sources', label: 'Fontes', icon: Layers },
         { id: 'source_diagnostics', label: 'Diagnóstico de Fontes', icon: Shield },
         { id: 'api_player', label: 'Player & Domínios', icon: Globe2 },
+        { id: 'ads', label: 'Propagandas', icon: Megaphone },
       ]
     },
     {
       title: 'API e Desenvolvedores',
       items: [
+        { id: 'connection_analytics', label: 'Connection Analytics', icon: BarChart3 },
         { id: 'api_developers', label: 'Desenvolvedores & Apps', icon: Key },
         { id: 'api_monitoring', label: 'Monitorização & Quotas', icon: Activity },
         { id: 'api_plans', label: 'Planos & Limites', icon: Layers },
@@ -657,100 +685,168 @@ export const AdminView: React.FC<AdminViewProps> = ({ initialTab }) => {
               exit={{ opacity: 0, y: -10 }}
               transition={{ duration: 0.15 }}
             >
-              {/* 1. DASHBOARD OVERVIEW */}
+              {/* 1. VISÃO GERAL / DASHBOARD OVERVIEW */}
               {activeTab === 'overview' && (
                 <div className="space-y-6 sm:space-y-8">
-                  
-                  {/* COMPACT RESPONSIVE DASHBOARD CARDS (6 METRICS) */}
-                  <div className="grid grid-cols-2 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 sm:gap-4">
-                    {/* Movies */}
+                  {/* 5 CORE LIBRARY KPIS (FILMES, SÉRIES, EPISÓDIOS, ANIMES, DORAMAS) */}
+                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 sm:gap-4">
                     <button
                       onClick={() => handleSelectTab('catalog_movies')}
-                      className="text-left bg-[#0D0F15] border border-white/5 p-4 rounded-2xl space-y-2.5 hover:border-brand/40 transition-all group"
+                      className="text-left bg-[#0D0F15] border border-white/[0.08] p-4 rounded-2xl space-y-2.5 hover:border-brand/40 transition-all group"
                     >
                       <div className="flex justify-between items-center">
-                        <div className="p-2 bg-brand/10 rounded-xl text-brand group-hover:scale-105 transition-transform">
+                        <div className="p-2 bg-brand/10 rounded-xl text-brand">
                           <Film className="w-4 h-4" />
                         </div>
-                        <span className="text-[9px] font-black text-emerald-400 uppercase tabular-nums">
+                        <span className="text-[10px] font-bold text-emerald-400 tabular-nums">
                           {stats?.publishedMovies ?? 0} Pub.
                         </span>
                       </div>
                       <div>
-                        <p className="text-[9px] font-black text-zinc-500 uppercase tracking-widest">Filmes no Acervo</p>
-                        <h3 className="text-2xl font-black text-white mt-0.5 tabular-nums">{stats?.totalMovies ?? 0}</h3>
+                        <p className="text-[10px] font-black text-zinc-500 uppercase tracking-widest">Filmes</p>
+                        <h3 className="text-2xl font-black text-white mt-0.5 tabular-nums">
+                          {(stats?.totalMovies ?? 0).toLocaleString('pt-PT')}
+                        </h3>
                         <p className="text-[10px] text-zinc-500 mt-0.5 tabular-nums">
                           {stats?.moviesWithoutSource ?? 0} sem fonte
                         </p>
                       </div>
                     </button>
 
-                    {/* Series */}
                     <button
                       onClick={() => handleSelectTab('catalog_series')}
-                      className="text-left bg-[#0D0F15] border border-white/5 p-4 rounded-2xl space-y-2.5 hover:border-brand/40 transition-all group"
+                      className="text-left bg-[#0D0F15] border border-white/[0.08] p-4 rounded-2xl space-y-2.5 hover:border-brand/40 transition-all group"
                     >
                       <div className="flex justify-between items-center">
-                        <div className="p-2 bg-blue-500/10 rounded-xl text-blue-400 group-hover:scale-105 transition-transform">
+                        <div className="p-2 bg-sky-500/10 rounded-xl text-sky-400">
                           <Tv className="w-4 h-4" />
                         </div>
-                        <span className="text-[9px] font-black text-purple-400 uppercase tabular-nums">
-                          {stats?.totalSeasons ?? 0}T · {stats?.totalEpisodes ?? 0}E
+                        <span className="text-[10px] font-bold text-emerald-400 tabular-nums">
+                          {stats?.publishedSeries ?? 0} Pub.
                         </span>
                       </div>
                       <div>
-                        <p className="text-[9px] font-black text-zinc-500 uppercase tracking-widest">Séries no Acervo</p>
-                        <h3 className="text-2xl font-black text-white mt-0.5 tabular-nums">{stats?.totalSeries ?? 0}</h3>
+                        <p className="text-[10px] font-black text-zinc-500 uppercase tracking-widest">Séries</p>
+                        <h3 className="text-2xl font-black text-white mt-0.5 tabular-nums">
+                          {(stats?.totalSeries ?? 0).toLocaleString('pt-PT')}
+                        </h3>
                         <p className="text-[10px] text-zinc-500 mt-0.5 tabular-nums">
-                          {stats?.seriesWithoutSource ?? 0} sem fonte
+                          {stats?.totalSeasons ?? 0} temporadas
                         </p>
                       </div>
                     </button>
 
-                    {/* Total Sources */}
                     <button
-                      onClick={() => handleSelectTab('video_sources')}
-                      className="text-left bg-[#0D0F15] border border-white/5 p-4 rounded-2xl space-y-2.5 hover:border-brand/40 transition-all group"
+                      onClick={() => handleSelectTab('import_series')}
+                      className="text-left bg-[#0D0F15] border border-white/[0.08] p-4 rounded-2xl space-y-2.5 hover:border-brand/40 transition-all group"
                     >
                       <div className="flex justify-between items-center">
-                        <div className="p-2 bg-emerald-500/10 rounded-xl text-emerald-400 group-hover:scale-105 transition-transform">
+                        <div className="p-2 bg-violet-500/10 rounded-xl text-violet-400">
+                          <Layers className="w-4 h-4" />
+                        </div>
+                        <span className="text-[10px] font-bold text-violet-400 uppercase">Indexados</span>
+                      </div>
+                      <div>
+                        <p className="text-[10px] font-black text-zinc-500 uppercase tracking-widest">Episódios</p>
+                        <h3 className="text-2xl font-black text-white mt-0.5 tabular-nums">
+                          {(stats?.totalEpisodes ?? 0).toLocaleString('pt-PT')}
+                        </h3>
+                        <p className="text-[10px] text-zinc-500 mt-0.5 tabular-nums">
+                          {stats?.seriesWithoutSource ?? 0} séries sem link
+                        </p>
+                      </div>
+                    </button>
+
+                    <button
+                      onClick={() => handleSelectTab('catalog_animes')}
+                      className="text-left bg-[#0D0F15] border border-white/[0.08] p-4 rounded-2xl space-y-2.5 hover:border-brand/40 transition-all group"
+                    >
+                      <div className="flex justify-between items-center">
+                        <div className="p-2 bg-amber-500/10 rounded-xl text-amber-400">
+                          <Sparkles className="w-4 h-4" />
+                        </div>
+                        <span className="text-[10px] font-bold text-amber-400 tabular-nums">
+                          {stats?.publishedAnimes ?? 0} Pub.
+                        </span>
+                      </div>
+                      <div>
+                        <p className="text-[10px] font-black text-zinc-500 uppercase tracking-widest">Animes</p>
+                        <h3 className="text-2xl font-black text-white mt-0.5 tabular-nums">
+                          {(stats?.totalAnimes ?? 0).toLocaleString('pt-PT')}
+                        </h3>
+                        <p className="text-[10px] text-zinc-500 mt-0.5">Categoria Anime</p>
+                      </div>
+                    </button>
+
+                    <button
+                      onClick={() => handleSelectTab('catalog_doramas')}
+                      className="text-left bg-[#0D0F15] border border-white/[0.08] p-4 rounded-2xl space-y-2.5 hover:border-brand/40 transition-all group col-span-2 sm:col-span-1"
+                    >
+                      <div className="flex justify-between items-center">
+                        <div className="p-2 bg-rose-500/10 rounded-xl text-rose-400">
+                          <Heart className="w-4 h-4" />
+                        </div>
+                        <span className="text-[10px] font-bold text-rose-400 tabular-nums">
+                          {stats?.publishedDoramas ?? 0} Pub.
+                        </span>
+                      </div>
+                      <div>
+                        <p className="text-[10px] font-black text-zinc-500 uppercase tracking-widest">Doramas</p>
+                        <h3 className="text-2xl font-black text-white mt-0.5 tabular-nums">
+                          {(stats?.totalDoramas ?? 0).toLocaleString('pt-PT')}
+                        </h3>
+                        <p className="text-[10px] text-zinc-500 mt-0.5">Dramas Asiáticos</p>
+                      </div>
+                    </button>
+                  </div>
+
+                  {/* OPERATIONAL DIAGNOSTIC STRIP (4 CARDS) */}
+                  <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+                    <button
+                      onClick={() => handleSelectTab('video_sources')}
+                      className="text-left bg-[#0D0F15] border border-white/[0.08] p-4 rounded-2xl space-y-2 hover:border-brand/40 transition-all"
+                    >
+                      <div className="flex justify-between items-center">
+                        <div className="p-2 bg-emerald-500/10 rounded-xl text-emerald-400">
                           <Server className="w-4 h-4" />
                         </div>
-                        <span className="text-[9px] font-black text-emerald-400 uppercase tabular-nums">
+                        <span className="text-[10px] font-bold text-emerald-400 tabular-nums">
                           {stats?.onlineLinks ?? 0} Online
                         </span>
                       </div>
                       <div>
-                        <p className="text-[9px] font-black text-zinc-500 uppercase tracking-widest">Fontes de Vídeo</p>
-                        <h3 className="text-2xl font-black text-white mt-0.5 tabular-nums">{stats?.totalLinks ?? 0}</h3>
-                        <p className="text-[10px] text-zinc-500 mt-0.5 tabular-nums">
-                          {stats?.offlineLinks ?? 0} offline
-                        </p>
+                        <p className="text-[10px] font-black text-zinc-500 uppercase tracking-widest">Fontes de Vídeo</p>
+                        <h3 className="text-xl font-black text-white tabular-nums">{stats?.totalLinks ?? 0}</h3>
+                        <p className="text-[10px] text-zinc-500 tabular-nums">{stats?.offlineLinks ?? 0} offline</p>
                       </div>
                     </button>
 
-                    {/* Integrity Alerts */}
                     <button
                       onClick={() => handleSelectTab('recovery')}
-                      className="text-left bg-[#0D0F15] border border-white/5 p-4 rounded-2xl space-y-2.5 hover:border-brand/40 transition-all group"
+                      className="text-left bg-[#0D0F15] border border-white/[0.08] p-4 rounded-2xl space-y-2 hover:border-brand/40 transition-all"
                     >
                       <div className="flex justify-between items-center">
-                        <div className="p-2 bg-amber-500/10 rounded-xl text-amber-400 group-hover:scale-105 transition-transform">
+                        <div className="p-2 bg-amber-500/10 rounded-xl text-amber-400">
                           <AlertTriangle className="w-4 h-4" />
                         </div>
-                        <span className="text-[9px] font-black text-zinc-400 uppercase tabular-nums">
+                        <span className="text-[10px] font-bold text-zinc-400 tabular-nums">
                           {(stats?.deletedMovies ?? 0) + (stats?.deletedSeries ?? 0)} Lixeira
                         </span>
                       </div>
                       <div>
-                        <p className="text-[9px] font-black text-zinc-500 uppercase tracking-widest">Alertas Integridade</p>
-                        <h3 className="text-2xl font-black text-white mt-0.5 tabular-nums">{stats?.totalProblematic ?? 0}</h3>
-                        <p className="text-[10px] text-zinc-500 mt-0.5">Registos por rever</p>
+                        <p className="text-[10px] font-black text-zinc-500 uppercase tracking-widest">Alertas Metadados</p>
+                        <h3 className="text-xl font-black text-white tabular-nums">
+                          {stats?.metadataAlertsCount ?? stats?.totalProblematic ?? 0}
+                        </h3>
+                        <p className="text-[10px] text-zinc-500 truncate">
+                          {stats?.metadataAlerts
+                            ? `${stats.metadataAlerts.missingPoster} poster · ${stats.metadataAlerts.missingSource} fonte`
+                            : 'Registos por rever'}
+                        </p>
                       </div>
                     </button>
 
-                    {/* TMDB API DIAGNOSTIC CARD */}
-                    <div className="bg-[#0D0F15] border border-white/5 p-4 rounded-2xl space-y-2.5 hover:border-brand/30 transition-all">
+                    <div className="bg-[#0D0F15] border border-white/[0.08] p-4 rounded-2xl space-y-2">
                       <div className="flex items-center justify-between">
                         <div className="p-2 bg-purple-500/10 rounded-xl text-purple-400">
                           <Key className="w-4 h-4" />
@@ -758,49 +854,40 @@ export const AdminView: React.FC<AdminViewProps> = ({ initialTab }) => {
                         <button
                           onClick={handleTestTmdbClick}
                           disabled={testingTmdb}
-                          className="p-1 bg-white/5 hover:bg-white/10 rounded-lg text-zinc-300 hover:text-white text-[8px] font-bold uppercase transition-all flex items-center gap-1 border border-white/10"
-                          title="Testar Conexão TMDB"
+                          className="p-1 bg-white/5 hover:bg-white/10 rounded-lg text-zinc-300 hover:text-white text-[10px] font-bold uppercase flex items-center gap-1 border border-white/10"
                         >
                           <RefreshCw className={`w-2.5 h-2.5 ${testingTmdb ? 'animate-spin text-brand' : ''}`} />
                           <span>Testar</span>
                         </button>
                       </div>
-
                       <div>
-                        <p className="text-[9px] font-black text-zinc-500 uppercase tracking-widest">TMDB API</p>
+                        <p className="text-[10px] font-black text-zinc-500 uppercase tracking-widest">TMDB API</p>
                         <div className="mt-1">
-                          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[8px] font-black uppercase tracking-wider ${tmdbBadge.color}`}>
+                          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[9px] font-black uppercase tracking-wider ${tmdbBadge.color}`}>
                             <TmdbBadgeIcon className={`w-2.5 h-2.5 ${tmdbBadge.animate ? 'animate-spin' : ''}`} />
                             {tmdbBadge.label}
                           </span>
                         </div>
                         {tmdbState.latencyMs ? (
-                          <p className="text-[8px] text-zinc-500 font-mono mt-0.5">Latência: {tmdbState.latencyMs}ms</p>
-                        ) : (
-                          <p className="text-[8px] text-zinc-600 mt-0.5 font-medium">Oficial</p>
-                        )}
+                          <p className="text-[10px] text-zinc-500 font-mono mt-0.5">Latência: {tmdbState.latencyMs}ms</p>
+                        ) : null}
                       </div>
                     </div>
 
-                    {/* DATABASE / SYSTEM STATUS CARD */}
                     <button
                       onClick={() => handleSelectTab('system_health')}
-                      className="text-left bg-[#0D0F15] border border-white/5 p-4 rounded-2xl space-y-2.5 hover:border-brand/40 transition-all group"
+                      className="text-left bg-[#0D0F15] border border-white/[0.08] p-4 rounded-2xl space-y-2 hover:border-brand/40 transition-all"
                     >
                       <div className="flex justify-between items-center">
-                        <div className="p-2 bg-emerald-500/10 rounded-xl text-emerald-400 group-hover:scale-105 transition-transform">
+                        <div className="p-2 bg-emerald-500/10 rounded-xl text-emerald-400">
                           <HardDrive className="w-4 h-4" />
                         </div>
-                        <span className="text-[9px] font-black text-emerald-400 uppercase">
-                          Ativo
-                        </span>
+                        <span className="text-[10px] font-bold text-emerald-400 uppercase">Ativo</span>
                       </div>
                       <div>
-                        <p className="text-[9px] font-black text-zinc-500 uppercase tracking-widest">Base de Dados</p>
-                        <h3 className="text-xl font-black text-white mt-0.5">SQLite</h3>
-                        <p className="text-[10px] text-emerald-400/80 mt-0.5 font-medium">
-                          100% Integridade OK
-                        </p>
+                        <p className="text-[10px] font-black text-zinc-500 uppercase tracking-widest">Estado API & BD</p>
+                        <h3 className="text-xl font-black text-white">Online</h3>
+                        <p className="text-[10px] text-emerald-400/80 font-medium">Persistência íntegra</p>
                       </div>
                     </button>
                   </div>
@@ -875,15 +962,41 @@ export const AdminView: React.FC<AdminViewProps> = ({ initialTab }) => {
                       <h3 className="text-base font-bold font-display uppercase tracking-tight">Atalhos de Gestão</h3>
                       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-2.5">
                         <button 
-                          onClick={() => handleSelectTab('import_series')}
+                          onClick={() => handleSelectTab('smart_link_import')}
+                          className="p-3.5 bg-[#0D0F15] border border-brand/30 hover:border-brand text-white rounded-2xl flex items-center gap-3.5 transition-all group"
+                        >
+                          <div className="p-2 bg-brand/15 rounded-xl group-hover:bg-brand/25 transition-all text-brand">
+                            <Link2 className="w-4 h-4" />
+                          </div>
+                          <div className="text-left min-w-0">
+                            <p className="text-xs font-black uppercase tracking-wider truncate">Importação Inteligente</p>
+                            <p className="text-[10px] text-zinc-500 font-medium truncate">Analisar links Seekee + TMDB</p>
+                          </div>
+                        </button>
+
+                        <button 
+                          onClick={() => handleSelectTab('smart_import')}
                           className="p-3.5 bg-brand hover:bg-brand/90 text-white rounded-2xl flex items-center gap-3.5 transition-all shadow-xl shadow-brand/20 group"
                         >
                           <div className="p-2 bg-white/20 rounded-xl group-hover:scale-110 transition-transform">
+                            <Wand2 className="w-4 h-4" />
+                          </div>
+                          <div className="text-left min-w-0">
+                            <p className="text-xs font-black uppercase tracking-wider truncate">Importar Conteúdo PRO</p>
+                            <p className="text-[10px] opacity-80 font-medium truncate">Filmes, Séries, Animes & Doramas</p>
+                          </div>
+                        </button>
+
+                        <button 
+                          onClick={() => handleSelectTab('import_series')}
+                          className="p-3.5 bg-[#0D0F15] border border-white/5 hover:border-brand/40 text-white rounded-2xl flex items-center gap-3.5 transition-all group"
+                        >
+                          <div className="p-2 bg-white/5 rounded-xl group-hover:bg-brand/20 transition-all text-sky-400">
                             <Tv className="w-4 h-4" />
                           </div>
                           <div className="text-left min-w-0">
-                            <p className="text-xs font-black uppercase tracking-wider truncate">Importar Séries PRO</p>
-                            <p className="text-[10px] opacity-80 font-medium truncate">Temporadas, episódios e links</p>
+                            <p className="text-xs font-black uppercase tracking-wider truncate">Episódios & Séries PRO</p>
+                            <p className="text-[10px] text-zinc-500 font-medium truncate">Temporadas e links por episódio</p>
                           </div>
                         </button>
 
@@ -1096,6 +1209,34 @@ export const AdminView: React.FC<AdminViewProps> = ({ initialTab }) => {
                 </div>
               )}
 
+              {activeTab === 'trending_admin' && (
+                <AdminTrendingPanel
+                  onOpenSmartImporter={() => handleSelectTab('smart_import')}
+                />
+              )}
+              {activeTab === 'smart_link_import' && (
+                <SmartLinkImporter
+                  onCatalogUpdated={loadDashboardData}
+                  onViewCatalogItem={info => {
+                    setCatalogSearchPrefill({ query: String(info.tmdbId || info.title), nonce: Date.now() });
+                    if (info.categories?.includes('anime')) handleSelectTab('catalog_animes');
+                    else if (info.categories?.includes('dorama')) handleSelectTab('catalog_doramas');
+                    else handleSelectTab(info.type === 'tv' ? 'catalog_series' : 'catalog_movies');
+                  }}
+                />
+              )}
+              {activeTab === 'smart_import' && (
+                <SmartContentImporter
+                  onCatalogUpdated={loadDashboardData}
+                  onOpenSeriesPro={() => handleSelectTab('import_series')}
+                  onViewCatalogItem={info => {
+                    setCatalogSearchPrefill({ query: String(info.tmdbId || info.title), nonce: Date.now() });
+                    if (info.categories?.includes('anime')) handleSelectTab('catalog_animes');
+                    else if (info.categories?.includes('dorama')) handleSelectTab('catalog_doramas');
+                    else handleSelectTab(info.type === 'tv' ? 'catalog_series' : 'catalog_movies');
+                  }}
+                />
+              )}
               {activeTab === 'import_series' && <SeriesImporterPro onCatalogUpdated={loadDashboardData} />}
               {activeTab === 'import_m3u' && <M3UImporter onCatalogUpdated={loadDashboardData} />}
               {activeTab === 'import_single' && (
@@ -1128,7 +1269,41 @@ export const AdminView: React.FC<AdminViewProps> = ({ initialTab }) => {
                   onOpenSources={handleOpenSourcesForMedia}
                 />
               )}
+              {activeTab === 'catalog_animes' && (
+                <CatalogManager
+                  key="animes"
+                  initialFilterType="all"
+                  initialFilterCategory="anime"
+                  externalSearch={catalogSearchPrefill}
+                  onSwitchTab={handleSelectTab}
+                  onStatsUpdated={loadDashboardData}
+                  onOpenSources={handleOpenSourcesForMedia}
+                />
+              )}
+              {activeTab === 'catalog_doramas' && (
+                <CatalogManager
+                  key="doramas"
+                  initialFilterType="all"
+                  initialFilterCategory="dorama"
+                  externalSearch={catalogSearchPrefill}
+                  onSwitchTab={handleSelectTab}
+                  onStatsUpdated={loadDashboardData}
+                  onOpenSources={handleOpenSourcesForMedia}
+                />
+              )}
               {activeTab === 'categories' && <CategoriesManager onSwitchTab={handleSelectTab} />}
+              {activeTab === 'server_control' && (
+                <ServerControlCenter
+                  onOpenPlayer={(tmdbId, type, season, episode) => {
+                    navigateTo('player', { tmdbId, type, season, episode });
+                  }}
+                  onEditSources={(tmdbId, type) => {
+                    setSourcePreselection({ tmdbId, type, title: '' });
+                    setActiveTab('video_sources');
+                  }}
+                />
+              )}
+              {activeTab === 'connection_analytics' && <ConnectionAnalyticsView />}
               {activeTab === 'source_diagnostics' && <SourceDiagnosticsView />}
               {activeTab === 'video_sources' && (
                 <VideoSourcesManager
@@ -1148,37 +1323,8 @@ export const AdminView: React.FC<AdminViewProps> = ({ initialTab }) => {
               {activeTab === 'activity_log' && <ActivityLogView />}
               {activeTab === 'trash_view' && <TrashView />}
 
-              {activeTab === 'users' && (
-                <div className="space-y-6">
-                  <h3 className="text-xl font-bold font-display uppercase tracking-tight">Utilizadores Registados</h3>
-                  <div className="bg-[#0D0F15] border border-white/5 rounded-2xl overflow-hidden shadow-2xl overflow-x-auto">
-                    <table className="w-full text-left text-xs">
-                      <thead className="bg-white/5 text-[10px] font-black uppercase tracking-[0.2em] text-zinc-500">
-                        <tr>
-                          <th className="p-4">Utilizador</th>
-                          <th className="p-4">Email</th>
-                          <th className="p-4">Cargo</th>
-                          <th className="p-4">Registado em</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-white/5">
-                        {(Array.isArray(usersList) ? usersList : []).map(u => (
-                          <tr key={u.id} className="hover:bg-white/5 transition-all">
-                            <td className="p-4 font-bold text-white">{u.name}</td>
-                            <td className="p-4 text-zinc-400 font-mono">{u.email}</td>
-                            <td className="p-4">
-                              <span className={`px-2.5 py-1 rounded-full text-[9px] font-black uppercase ${u.role === 'admin' || u.role === 'founder' ? 'bg-brand/10 text-brand border border-brand/20' : 'bg-white/5 text-zinc-400'}`}>
-                                {u.role}
-                              </span>
-                            </td>
-                            <td className="p-4 text-zinc-500 font-mono">{new Date(u.createdAt).toLocaleDateString('pt-PT')}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
+              {activeTab === 'ads' && <AdsManager />}
+              {activeTab === 'users' && <UsersManager />}
 
               {activeTab === 'settings' && (
                 <div className="max-w-4xl space-y-8">
@@ -1274,11 +1420,129 @@ export const AdminView: React.FC<AdminViewProps> = ({ initialTab }) => {
             exit={{ opacity: 0, y: 20 }}
             className="fixed bottom-6 right-6 z-[100] bg-brand text-white px-5 py-3 rounded-2xl shadow-2xl font-black text-xs uppercase tracking-wider flex items-center gap-2 border border-white/20"
           >
-            <div className="w-2 h-2 rounded-full bg-white animate-pulse" />
+            <div className="w-2 h-2 rounded-full bg-white" />
             {toastMessage}
           </motion.div>
         )}
       </AnimatePresence>
+    </div>
+  );
+};
+
+const AdminTrendingPanel: React.FC<{ onOpenSmartImporter: () => void }> = ({ onOpenSmartImporter }) => {
+  const [tab, setTab] = useState<'trending' | 'movies' | 'series' | 'animes' | 'doramas' | 'recent'>('trending');
+  const [data, setData] = useState<TrendingSectionResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const load = async (refresh = false) => {
+    setLoading(true);
+    try {
+      const res = await api.getTrending({ tab, refresh });
+      setData(res);
+    } catch {
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    load(false);
+  }, [tab]);
+
+  return (
+    <div className="space-y-6">
+      <div className="bg-[#0D0F15] border border-white/[0.08] rounded-2xl p-5 flex flex-wrap items-center justify-between gap-4">
+        <div>
+          <h3 className="text-lg font-black text-white uppercase tracking-tight flex items-center gap-2">
+            <Flame className="w-5 h-5 text-brand" />
+            Monitor de Tendências (Biblioteca vs TMDB)
+          </h3>
+          <p className="text-xs text-zinc-400 mt-0.5">
+            Separação estrita entre títulos já presentes no catálogo e destaques externos do TMDB para importação manual.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {(['trending', 'movies', 'series', 'animes', 'doramas', 'recent'] as const).map(t => (
+            <button
+              key={t}
+              type="button"
+              onClick={() => setTab(t)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold uppercase ${
+                tab === t ? 'bg-brand text-white' : 'bg-black/60 border border-white/10 text-zinc-400 hover:text-white'
+              }`}
+            >
+              {t === 'trending' ? 'Em Alta' : t === 'movies' ? 'Filmes' : t === 'series' ? 'Séries' : t === 'animes' ? 'Animes' : t === 'doramas' ? 'Doramas' : 'Recentes'}
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={() => load(true)}
+            className="p-2 rounded-lg bg-black/60 border border-white/10 text-zinc-300 hover:text-white"
+            title="Atualizar"
+          >
+            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin text-brand' : ''}`} />
+          </button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="bg-[#0D0F15] border border-white/[0.08] rounded-2xl p-5 space-y-3">
+          <h4 className="text-xs font-black uppercase tracking-wider text-emerald-400">
+            Na Biblioteca RONYCINE ({data?.libraryItems?.length ?? 0})
+          </h4>
+          <div className="space-y-2 max-h-[480px] overflow-y-auto">
+            {(data?.libraryItems || []).map(item => (
+              <div key={item.id} className="p-3 rounded-xl bg-black/50 border border-white/5 flex items-center justify-between gap-3 text-xs">
+                <div className="min-w-0">
+                  <p className="font-bold text-white truncate">{item.title}</p>
+                  <p className="text-[10px] text-zinc-400 font-mono">
+                    TMDB {item.tmdbId || '—'} · {item.type === 'tv' ? 'Série' : 'Filme'}
+                  </p>
+                </div>
+                <span className={`px-2 py-0.5 rounded text-[10px] font-bold shrink-0 ${item.hasPlayableSource ? 'bg-emerald-500/15 text-emerald-400' : 'bg-zinc-800 text-zinc-400'}`}>
+                  {item.hasPlayableSource ? 'Com Fonte' : 'Sem Fonte'}
+                </span>
+              </div>
+            ))}
+            {(!data?.libraryItems || data.libraryItems.length === 0) && (
+              <p className="text-xs text-zinc-500 py-6 text-center">Sem itens na biblioteca neste separador.</p>
+            )}
+          </div>
+        </div>
+
+        <div className="bg-[#0D0F15] border border-white/[0.08] rounded-2xl p-5 space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <h4 className="text-xs font-black uppercase tracking-wider text-sky-400">
+              Tendências TMDB Externas ({data?.tmdbGlobalItems?.length ?? 0})
+            </h4>
+            <button
+              type="button"
+              onClick={onOpenSmartImporter}
+              className="px-3 py-1.5 rounded-lg bg-brand text-white text-[11px] font-bold"
+            >
+              Abrir Importador Manual
+            </button>
+          </div>
+          <div className="space-y-2 max-h-[480px] overflow-y-auto">
+            {(data?.tmdbGlobalItems || []).map(item => (
+              <div key={`${item.type}-${item.tmdbId}`} className="p-3 rounded-xl bg-black/50 border border-white/5 flex items-center justify-between gap-3 text-xs">
+                <div className="min-w-0">
+                  <p className="font-bold text-white truncate">{item.title}</p>
+                  <p className="text-[10px] text-zinc-400 font-mono">
+                    TMDB {item.tmdbId} · {item.type === 'tv' ? 'Série' : 'Filme'} · {item.releaseYear || '—'}
+                  </p>
+                </div>
+                <span className="px-2 py-0.5 rounded bg-sky-500/15 text-sky-300 text-[10px] font-bold shrink-0">
+                  Não Importado
+                </span>
+              </div>
+            ))}
+            {(!data?.tmdbGlobalItems || data.tmdbGlobalItems.length === 0) && (
+              <p className="text-xs text-zinc-500 py-6 text-center">Sem destaques externos disponíveis.</p>
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   );
 };

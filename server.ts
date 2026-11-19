@@ -1,19 +1,53 @@
 import express, { Request, Response } from 'express';
 import path from 'path';
+import fs from 'fs';
 import dotenv from 'dotenv';
+import multer from 'multer';
 import { createServer as createViteServer } from 'vite';
 import { db } from './src/server/database.js';
 import { recoveryService } from './src/server/recoveryService.js';
 import { massImportService } from './src/server/massImportService.js';
 import { m3uImporter, M3UImporterService } from './src/server/m3uImporterService.js';
-import { MediaItem, ImportStatus, StreamSource, PlanTier, DeveloperApp, ApiKeyRecord, PlanConfig } from './src/types.js';
+import { MediaItem, ImportStatus, StreamSource, PlanTier, DeveloperApp, ApiKeyRecord, PlanConfig, SeriesSyncJob, BatchSeriesDiscoveryGroup, BatchDiscoveredMovieItem, BatchEpisodeSourceDraft, SeasonDiscoveryJob } from './src/types.js';
 import {
   classifySourceUrl,
   mapToCanonicalClassification,
   mapToCanonicalState
 } from './src/lib/sourceClassification.js';
+import {
+  computeVersionAvailability,
+  normalizeVersionType
+} from './src/lib/sourceMetadata.js';
 import { probeVideoSource, validatePublicHttpUrl } from './src/server/sourceProbe.js';
+import { analyzeExternalLink, buildSeasonsPreviewForSeries, discoverSeasonEpisodes } from './src/server/linkAnalyzer.js';
+import {
+  buildBatchSeasonDiscoveryJob,
+  buildDeterministicSeriesJob,
+  discoverSeasonEpisodesBatchItem,
+  discoverMovieBatchItem,
+  verifyMgebCompatibility,
+  resolveDetailedDiscoveryState,
+  finalizeSeasonCounts,
+  recalculateJobStats,
+  detectSeasonUrlPattern
+} from './src/server/seasonDiscoveryEngine.js';
+import { MGEB_PREFIX, buildMgebUrl, stripMgebPrefix } from './src/lib/mgebUtils.js';
 import { OFFICIAL_BASE_URL, buildOfficialEmbedPath, buildOfficialEmbedUrl } from './src/lib/siteConfig.js';
+import {
+  analyzeBackupUpload,
+  cancelImportJob,
+  createBackupArchive,
+  createBackupDownloadToken,
+  deleteBackupRecordAndFile,
+  getAllBackupHistory,
+  getBackupSystemStatus,
+  getImportJobStatus,
+  listImportJobs,
+  resolveBackupFileForDownload,
+  resumeImportJob,
+  startBackupImportJob,
+  verifyBackupDownloadToken
+} from './src/server/backupService.js';
 
 dotenv.config();
 
@@ -41,9 +75,18 @@ import {
 // Failed attempts tracker for admin rate-limiting
 const loginAttempts: Record<string, { count: number; lockUntil?: number }> = {};
 
-// Server-side Search Cache
+// Server-side Search & Trending Caches
 const searchCache = new Map<string, { timestamp: number; data: any }>();
 const SEARCH_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const publicTmdbTrendingCache = new Map<string, { timestamp: number; items: any[]; tmdbOnline: boolean }>();
+const PUBLIC_TRENDING_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const tmdbListCache = new Map<string, { timestamp: number; data: any }>();
+const TMDB_LIST_CACHE_TTL = 2 * 60 * 60 * 1000; // 2 hours
+
+function invalidatePublicTrendingCache() {
+  publicTmdbTrendingCache.clear();
+  tmdbListCache.clear();
+}
 
 function normalizeSearchQuery(str: string): string {
   return str
@@ -54,6 +97,21 @@ function normalizeSearchQuery(str: string): string {
     .replace(/\s+/g, ' ')
     .trim();
 }
+
+function parseSeasonParam(val: any, fallback = 1): number {
+  if (val === undefined || val === null || val === '') return fallback;
+  const n = Number(val);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, Math.floor(n));
+}
+
+// Active unlimited series progressive sync jobs
+const seriesSyncJobs = new Map<string, { job: SeriesSyncJob; cancelled: boolean }>();
+
+const backupUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 200 * 1024 * 1024 }
+});
 
 // Helper: Fetch TMDB API with error protection
 async function fetchTMDB(endpoint: string, params: Record<string, string> = {}, signal?: AbortSignal) {
@@ -80,15 +138,24 @@ async function fetchTMDB(endpoint: string, params: Record<string, string> = {}, 
   }
 }
 
-// Helper: Format raw TMDB movie or TV item into PLAYFILME+ MediaItem
+// Helper: Format raw TMDB movie or TV item into RONYCINE MediaItem
 function formatTMDBMedia(raw: any, type: 'movie' | 'tv'): Partial<MediaItem> & { tmdbId: number; type: 'movie' | 'tv'; title: string } {
   const isMovie = type === 'movie';
   const title = isMovie ? (raw.title || raw.original_title) : (raw.name || raw.original_name);
   const releaseDate = isMovie ? raw.release_date : raw.first_air_date;
+  const releaseYearNum = releaseDate ? parseInt(String(releaseDate).slice(0, 4), 10) : undefined;
 
-  const genres = raw.genres 
+  const genres = raw.genres
     ? raw.genres.map((g: any) => g.name)
     : (raw.genre_ids ? getGenreNamesByIds(raw.genre_ids, type) : []);
+
+  const originCountry: string[] = Array.isArray(raw.origin_country)
+    ? raw.origin_country.filter(Boolean)
+    : Array.isArray(raw.production_countries)
+      ? raw.production_countries.map((c: any) => c.iso_3166_1).filter(Boolean)
+      : [];
+  const originalLanguage: string | undefined = raw.original_language || undefined;
+  const popularity: number = typeof raw.popularity === 'number' ? Number(raw.popularity.toFixed(2)) : 0;
 
   const cast = raw.credits?.cast?.slice(0, 10).map((c: any) => ({
     id: c.id,
@@ -125,15 +192,21 @@ function formatTMDBMedia(raw: any, type: 'movie' | 'tv'): Partial<MediaItem> & {
     tmdbStatus: raw.status || undefined,
     title,
     originalTitle: isMovie ? raw.original_title : raw.original_name,
-    overview: raw.overview || 'Sem sinopse disponível em português.',
+    overview: raw.overview || 'Sinopse não disponível no TMDB.',
     posterPath: raw.poster_path ? `https://image.tmdb.org/t/p/w500${raw.poster_path}` : '',
     backdropPath: raw.backdrop_path ? `https://image.tmdb.org/t/p/w1280${raw.backdrop_path}` : (raw.poster_path ? `https://image.tmdb.org/t/p/w500${raw.poster_path}` : ''),
     voteAverage: raw.vote_average ? Number(raw.vote_average.toFixed(1)) : 0,
     voteCount: raw.vote_count || 0,
+    popularity,
+    originCountry,
+    originalLanguage,
+    releaseYear: releaseYearNum && !isNaN(releaseYearNum) ? releaseYearNum : undefined,
     releaseDate: isMovie ? releaseDate : undefined,
     firstAirDate: !isMovie ? releaseDate : undefined,
     genres,
     duration: raw.runtime || (raw.episode_run_time ? raw.episode_run_time[0] : undefined),
+    numberOfSeasons: raw.number_of_seasons || seasons.length || undefined,
+    numberOfEpisodes: raw.number_of_episodes || undefined,
     seasonsCount: raw.number_of_seasons || seasons.length,
     episodesCount: raw.number_of_episodes,
     seasons,
@@ -141,8 +214,71 @@ function formatTMDBMedia(raw: any, type: 'movie' | 'tv'): Partial<MediaItem> & {
     cast,
     director,
     featured: raw.vote_average > 7.8,
-    popular: raw.popularity > 50,
-    trending: raw.popularity > 100
+    popular: popularity > 50,
+    trending: popularity > 100
+  };
+}
+
+// Conservative smart category detector: never classifies all Animation as Anime or all Asian shows as Dorama
+function detectContentCategory(rawOrFormatted: any, type: 'movie' | 'tv') {
+  const genres: string[] = Array.isArray(rawOrFormatted.genres)
+    ? rawOrFormatted.genres.map((g: any) => (typeof g === 'string' ? g : g?.name || '')).filter(Boolean)
+    : Array.isArray(rawOrFormatted.genre_ids)
+      ? getGenreNamesByIds(rawOrFormatted.genre_ids, type)
+      : [];
+
+  const genresNorm = genres.map(g => g.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, ''));
+  const isAnimation = genresNorm.some(g => g.includes('animacao') || g.includes('animation') || g.includes('anime'));
+  const isDramaOrRomance = genresNorm.some(
+    g => g.includes('drama') || g.includes('romance') || g.includes('soap') || g.includes('melodrama')
+  );
+
+  const originCountry: string[] = Array.isArray(rawOrFormatted.originCountry)
+    ? rawOrFormatted.originCountry
+    : Array.isArray(rawOrFormatted.origin_country)
+      ? rawOrFormatted.origin_country
+      : Array.isArray(rawOrFormatted.production_countries)
+        ? rawOrFormatted.production_countries.map((c: any) => c.iso_3166_1).filter(Boolean)
+        : [];
+  const countriesUpper = originCountry.map(c => String(c).toUpperCase());
+  const origLang = String(rawOrFormatted.originalLanguage || rawOrFormatted.original_language || '').toLowerCase();
+
+  const isJapanese = origLang === 'ja' || countriesUpper.includes('JP');
+  const isEastAsianDoramaRegion =
+    countriesUpper.some(c => ['KR', 'JP', 'CN', 'TW', 'TH'].includes(c)) ||
+    ['ko', 'ja', 'zh', 'th'].includes(origLang);
+
+  const suggestedCategories: Array<'anime' | 'dorama'> = [];
+  const reasons: string[] = [];
+  let confidence: 'high' | 'medium' | 'low' = 'high';
+  let needsManualChoice = false;
+
+  if (isAnimation && isJapanese) {
+    suggestedCategories.push('anime');
+    reasons.push('Animação de origem japonesa identificada nos metadados oficiais do TMDB.');
+  } else if (isAnimation) {
+    confidence = 'medium';
+    needsManualChoice = true;
+    reasons.push('Conteúdo animado fora do Japão — confirme manualmente se deve ser marcado como Anime ou apenas Filme/Série.');
+  } else if (isEastAsianDoramaRegion && isDramaOrRomance) {
+    suggestedCategories.push('dorama');
+    reasons.push('Produção live-action do Leste Asiático com género Drama/Romance nos metadados do TMDB.');
+  } else if (isEastAsianDoramaRegion) {
+    confidence = 'medium';
+    needsManualChoice = true;
+    reasons.push('Produção asiática fora dos géneros Drama/Romance — confirme manualmente se pretende classificar como Dorama.');
+  } else {
+    reasons.push(type === 'movie' ? 'Classificado como Filme pelo TMDB.' : 'Classificado como Série pelo TMDB.');
+  }
+
+  return {
+    suggestedType: type,
+    suggestedCategories,
+    confidence,
+    needsManualChoice,
+    originCountry: countriesUpper,
+    originalLanguage: origLang || undefined,
+    reasons
   };
 }
 
@@ -360,6 +496,10 @@ function sanitizeMediaForApi(m: MediaItem) {
 }
 
 function sanitizeSourceForApi(src: any) {
+  const normVer = normalizeVersionType(src.versionType, src.serverName || src.label, src.audioLanguage);
+  const safeAudioLang =
+    src.audioLanguage ||
+    (normVer === 'legendado' ? 'Original' : normVer === 'dublado' ? 'Português' : undefined);
   return {
     id: src.id,
     tmdbId: Number(src.tmdbId || 0),
@@ -372,7 +512,10 @@ function sanitizeSourceForApi(src: any) {
     serverName: src.serverName || src.provider || 'Servidor Oficial',
     label: src.label || src.serverName || 'Servidor Principal',
     quality: src.quality || '1080p',
-    audioLanguage: src.audioLanguage || 'Português',
+    audioLanguage: safeAudioLang,
+    subtitleLanguage: src.subtitleLanguage || undefined,
+    versionType: normVer || src.versionType || undefined,
+    subtitleUrl: src.subtitleUrl || undefined,
     isPrimary: Boolean(src.isPrimary),
     priority: typeof src.priority === 'number' ? src.priority : 1,
     enabled: src.enabled !== false,
@@ -387,6 +530,7 @@ function sanitizeSourceForApi(src: any) {
       ? {
           recommendedPlaybackMode: src.diagnostics.recommendedPlaybackMode,
           contentType: src.diagnostics.contentType,
+          contentLength: src.diagnostics.contentLength ?? undefined,
           embedAllowed: src.diagnostics.embedAllowed,
           failureReason: src.diagnostics.failureReason
         }
@@ -649,6 +793,23 @@ async function startServer() {
   app.use(express.json({ limit: '100mb' }));
   app.use(express.urlencoded({ limit: '100mb', extended: true }));
 
+  // Unified CORS headers for /api/* and external integrations
+  app.use('/api', (req: Request, res: Response, next: any) => {
+    const reqOrigin = typeof req.headers.origin === 'string' ? req.headers.origin : '';
+    if (reqOrigin) {
+      res.setHeader('Access-Control-Allow-Origin', reqOrigin);
+      res.setHeader('Vary', 'Origin');
+    } else {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+    }
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-api-key, x-origin-domain');
+    if (req.method === 'OPTIONS') {
+      return res.sendStatus(204);
+    }
+    next();
+  });
+
   // Apply unified RONYCINE API v1 rate-limiting, key verification, domain check & monitoring
   app.use('/api/v1', v1ApiMiddleware);
 
@@ -661,12 +822,17 @@ async function startServer() {
 
   // Get Catalog with filtering & pagination
   app.get('/api/catalog', (req: Request, res: Response) => {
-    const { type, genre, search, section, yearFrom, yearTo, minRating, maxRating, status, source, sort, page, limit } = req.query;
+    const { type, category, genre, search, section, season, episode, yearFrom, yearTo, minRating, maxRating, status, source, sort, page, limit } = req.query;
+    const seasonNum = season !== undefined && season !== '' ? parseInt(String(season), 10) : undefined;
+    const episodeNum = episode !== undefined && episode !== '' ? parseInt(String(episode), 10) : undefined;
     const result = db.getCatalog({
       type: type as string,
+      category: category as string,
       genre: genre as string,
       search: search as string,
       section: section as string,
+      season: seasonNum !== undefined && !isNaN(seasonNum) ? seasonNum : undefined,
+      episode: episodeNum !== undefined && !isNaN(episodeNum) ? episodeNum : undefined,
       yearFrom: yearFrom ? parseInt(yearFrom as string) : undefined,
       yearTo: yearTo ? parseInt(yearTo as string) : undefined,
       minRating: minRating ? parseFloat(minRating as string) : undefined,
@@ -680,25 +846,81 @@ async function startServer() {
     res.json(result);
   });
 
+  // Public Random Discovery ("SURPREENDA-ME") — picks strictly from real existing playable catalog items
+  app.get('/api/catalog/random', (req: Request, res: Response) => {
+    const rawType = String(req.query.type || 'all').toLowerCase();
+    const excludeRaw = String(req.query.exclude || '').trim();
+    const excludeTmdbIds = excludeRaw
+      ? excludeRaw
+          .split(',')
+          .map(s => parseInt(s.trim(), 10))
+          .filter(n => !isNaN(n) && n > 0)
+      : [];
+
+    const picked = db.getRandomPlayableCatalogItem({
+      type: rawType,
+      excludeTmdbIds
+    });
+
+    if (!picked) {
+      return res.json({
+        success: false,
+        code: 'NO_ELIGIBLE_CONTENT',
+        message: 'Não existem conteúdos disponíveis para seleção aleatória neste momento.',
+        item: null,
+        totalEligible: 0
+      });
+    }
+
+    const { item, mediaType, seasonNumber, episodeNumber, totalEligible } = picked;
+    const yearValue =
+      item.releaseYear ||
+      (item.releaseDate ? parseInt(item.releaseDate.slice(0, 4), 10) : undefined) ||
+      (item.firstAirDate ? parseInt(item.firstAirDate.slice(0, 4), 10) : undefined);
+
+    res.json({
+      success: true,
+      totalEligible,
+      item: {
+        id: item.id,
+        tmdbId: item.tmdbId,
+        type: mediaType,
+        title: item.title,
+        originalTitle: item.originalTitle,
+        posterPath: item.posterPath,
+        backdropPath: item.backdropPath,
+        releaseYear: yearValue && !isNaN(yearValue) ? yearValue : undefined,
+        voteAverage: item.voteAverage,
+        overview: item.overview,
+        seasonNumber,
+        episodeNumber
+      }
+    });
+  });
+
   // Public Real Stats endpoint
   app.get(['/api/stats', '/api/v1/stats'], async (req: Request, res: Response) => {
     try {
       const publicStats = db.getPublicStats();
       const stats = db.getStats();
       const sources = await db.getAllVideoSources();
+      const globalCfg = db.getApiGlobalSettings();
       res.json({
         success: true,
         moviesCount: publicStats.moviesCount,
         seriesCount: publicStats.seriesCount,
         episodesCount: publicStats.episodesCount,
+        animesCount: publicStats.animesCount,
+        doramasCount: publicStats.doramasCount,
         totalCatalog: publicStats.totalCatalog,
         movies: publicStats.moviesCount,
         series: publicStats.seriesCount,
         links: stats.totalLinks + sources.length,
-        status: 'Online'
+        status: globalCfg.enabled ? 'Online' : 'Maintenance',
+        updatedAt: new Date().toISOString()
       });
     } catch (err) {
-      const media = db.getAllMedia();
+      const media = db.getAllMedia().filter(m => db.isMediaPublished(m));
       const movies = media.filter(m => m.type === 'movie').length;
       const series = media.filter(m => m.type === 'tv' || m.type === 'series').length;
       res.json({
@@ -706,13 +928,124 @@ async function startServer() {
         moviesCount: movies,
         seriesCount: series,
         episodesCount: 0,
+        animesCount: 0,
+        doramasCount: 0,
         totalCatalog: movies + series,
         movies,
         series,
         links: 0,
-        status: 'Online'
+        status: 'Online',
+        updatedAt: new Date().toISOString()
       });
     }
+  });
+
+  // Public Cinematic Trending Endpoint (Separates Local RONYCINE Library from TMDB Global Preview)
+  app.get(['/api/trending', '/api/v1/trending'], async (req: Request, res: Response) => {
+    const rawTab = String(req.query.tab || 'trending').toLowerCase();
+    const validTabs = ['trending', 'movies', 'series', 'animes', 'doramas', 'recent'] as const;
+    const tab = (validTabs.includes(rawTab as any) ? rawTab : 'trending') as typeof validTabs[number];
+    const forceRefresh = req.query.refresh === 'true';
+
+    const publicStats = db.getPublicStats();
+    const globalCfg = db.getApiGlobalSettings();
+    const libraryItems = db.getCatalogTrending({ tab, limit: 18 });
+    const recentAdditions = db.getCatalogTrending({ tab: 'recent', limit: 12 });
+    const popularLibrary = db.getCatalog({ sort: 'popular', limit: 12 }).items;
+
+    const allPublishedTrending = db.getCatalogTrending({ tab: 'trending', limit: 20 });
+    const heroSpotlight =
+      allPublishedTrending.find(item => item.hasPlayableSource && (item.backdropPath || item.posterPath)) ||
+      allPublishedTrending.find(item => Boolean(item.backdropPath || item.posterPath)) ||
+      allPublishedTrending[0] ||
+      null;
+
+    // Fetch TMDB Global Trending (cached 10 mins, strictly non-playable external preview)
+    let tmdbGlobalRaw: any[] = [];
+    let tmdbOnline = true;
+    const cachedTmdb = publicTmdbTrendingCache.get(tab);
+    if (!forceRefresh && cachedTmdb && Date.now() - cachedTmdb.timestamp < PUBLIC_TRENDING_CACHE_TTL_MS) {
+      tmdbGlobalRaw = cachedTmdb.items;
+      tmdbOnline = cachedTmdb.tmdbOnline;
+    } else {
+      let endpoint = '/trending/all/day';
+      const params: Record<string, string> = { page: '1' };
+      if (tab === 'movies') endpoint = '/trending/movie/day';
+      else if (tab === 'series') endpoint = '/trending/tv/day';
+      else if (tab === 'animes') {
+        endpoint = '/discover/tv';
+        params.with_genres = '16';
+        params.with_original_language = 'ja';
+        params.sort_by = 'popularity.desc';
+      } else if (tab === 'doramas') {
+        endpoint = '/discover/tv';
+        params.with_genres = '18';
+        params.with_origin_country = 'KR|JP|CN|TW';
+        params.sort_by = 'popularity.desc';
+      } else if (tab === 'recent') {
+        endpoint = '/trending/all/week';
+      }
+
+      const tmdbResp = await fetchTMDB(endpoint, params, AbortSignal.timeout(6000));
+      if (tmdbResp && Array.isArray(tmdbResp.results)) {
+        const seenKeys = new Set<string>();
+        tmdbGlobalRaw = tmdbResp.results
+          .filter((r: any) => r && r.id && r.media_type !== 'person')
+          .map((r: any) => {
+            const mediaType: 'movie' | 'tv' =
+              r.media_type === 'movie'
+                ? 'movie'
+                : r.media_type === 'tv'
+                  ? 'tv'
+                  : tab === 'movies'
+                    ? 'movie'
+                    : 'tv';
+            const formatted = formatTMDBMedia(r, mediaType);
+            const detection = detectContentCategory(r, mediaType);
+            return {
+              ...formatted,
+              id: `tmdb-${mediaType}-${formatted.tmdbId}`,
+              categories: tab === 'animes' ? ['anime'] : tab === 'doramas' ? ['dorama'] : detection.suggestedCategories,
+              inCatalog: false,
+              hasPlayableSource: false
+            };
+          })
+          .filter((item: any) => {
+            const k = `${item.tmdbId}:${item.type}`;
+            if (seenKeys.has(k)) return false;
+            seenKeys.add(k);
+            return true;
+          });
+        tmdbOnline = true;
+        publicTmdbTrendingCache.set(tab, { timestamp: Date.now(), items: tmdbGlobalRaw, tmdbOnline: true });
+      } else {
+        tmdbOnline = false;
+      }
+    }
+
+    // Never duplicate items that already exist in local catalog
+    const tmdbGlobalItems = tmdbGlobalRaw
+      .filter((ext: any) => !db.getMediaByTmdbAndType(Number(ext.tmdbId), ext.type))
+      .slice(0, 16)
+      .map((ext: any) => ({ ...ext, inCatalog: false, hasPlayableSource: false }));
+
+    res.json({
+      success: true,
+      tab,
+      heroSpotlight,
+      libraryItems,
+      tmdbGlobalItems,
+      recentAdditions,
+      popularLibrary,
+      stats: {
+        success: true,
+        ...publicStats,
+        status: globalCfg.enabled ? 'Online' : 'Maintenance',
+        updatedAt: new Date().toISOString()
+      },
+      tmdbOnline,
+      updatedAt: new Date().toISOString()
+    });
   });
 
   // RONYCINE API v1 - Health & System Diagnostics
@@ -826,6 +1159,9 @@ async function startServer() {
         label: v.serverName || v.sourceName || v.quality || 'Servidor Principal',
         quality: v.quality || '1080p',
         audioLanguage: v.audioLanguage || 'Português',
+        subtitleLanguage: v.subtitleLanguage,
+        versionType: v.versionType,
+        subtitleUrl: v.subtitleUrl,
         isPrimary: v.isPrimary ?? false,
         priority: typeof v.priority === 'number' ? v.priority : 1,
         enabled: v.enabled !== false,
@@ -1238,7 +1574,7 @@ async function startServer() {
 
     const rawType = String(type || tipo || 'movie').toLowerCase();
     const mediaType: 'movie' | 'tv' = rawType === 'tv' || rawType === 'series' ? 'tv' : 'movie';
-    const sNum = mediaType === 'tv' ? Math.max(0, parseInt(String(season || 1), 10) || 1) : undefined;
+    const sNum = mediaType === 'tv' ? parseSeasonParam(season, 1) : undefined;
     const eNum = mediaType === 'tv' ? Math.max(1, parseInt(String(episode || 1), 10) || 1) : undefined;
 
     if (domain && typeof domain === 'string' && ctx.app.authorizedDomains.length > 0) {
@@ -1311,6 +1647,391 @@ async function startServer() {
     return lower === 'inactive' || lower === 'offline' || lower === 'embed_blocked' || lower === 'unsupported_format';
   };
 
+  const playbackProbeCache = new Map<string, { timestamp: number; result: Awaited<ReturnType<typeof probeVideoSource>> }>();
+  const PLAYBACK_PROBE_CACHE_TTL_MS = 60 * 1000;
+
+  async function cachedProbeSource(url: string, timeoutMs = 4200) {
+    const clean = (url || '').trim();
+    const cached = playbackProbeCache.get(clean);
+    if (cached && Date.now() - cached.timestamp < PLAYBACK_PROBE_CACHE_TTL_MS) {
+      return cached.result;
+    }
+    const result = await probeVideoSource(clean, { timeoutMs });
+    playbackProbeCache.set(clean, { timestamp: Date.now(), result });
+    if (playbackProbeCache.size > 500) {
+      const oldestKey = playbackProbeCache.keys().next().value;
+      if (oldestKey) playbackProbeCache.delete(oldestKey);
+    }
+    return result;
+  }
+
+  function getAllRegisteredAuthorizedDomains(): string[] {
+    const activeApps = db.getDeveloperApps().filter(app => app.status !== 'SUSPENDED');
+    const set = new Set<string>();
+    for (const app of activeApps) {
+      for (const dom of app.authorizedDomains || []) {
+        const clean = normalizeDomainEntry(dom);
+        if (clean) set.add(clean);
+      }
+    }
+    return Array.from(set);
+  }
+
+  function buildCspFrameAncestors(domains: string[]): string {
+    if (domains.includes('*')) {
+      return 'frame-ancestors * http: https:';
+    }
+    const entries: string[] = ["'self'"];
+    for (const raw of domains) {
+      const clean = normalizeDomainEntry(raw);
+      if (!clean || clean === '*') continue;
+      entries.push(`https://${clean}`);
+      entries.push(`http://${clean}`);
+    }
+    return `frame-ancestors ${Array.from(new Set(entries)).join(' ')}`;
+  }
+
+  async function evaluateSourcesForPlayback(rawSources: any[]): Promise<{
+    compatible: any[];
+    rejected: Array<{ id?: string; url: string; reason: string; status: string }>;
+  }> {
+    const activeCandidates = (rawSources || []).filter(src => !isSourceDisabledOrUnavailable(src));
+    const compatible: any[] = [];
+    const rejected: Array<{ id?: string; url: string; reason: string; status: string }> = [];
+
+    for (const src of activeCandidates) {
+      const targetUrl = String(src.originalUrl || src.url || '').trim();
+      if (!targetUrl) {
+        rejected.push({ id: src.id, url: '', reason: 'URL ausente.', status: 'offline' });
+        continue;
+      }
+
+      const classified = classifySourceUrl(targetUrl);
+      if (!classified.valid) {
+        rejected.push({ id: src.id, url: targetUrl, reason: classified.error || 'URL inválida.', status: 'unsupported_format' });
+        continue;
+      }
+
+      const currentStatus = String(src.status || 'registered').toLowerCase();
+      const declaredFmt = String(src.format || '').toLowerCase();
+      const effectiveKind =
+        src.sourceKind && src.sourceKind !== 'UNKNOWN'
+          ? src.sourceKind
+          : classified.sourceKind;
+
+      const isConfirmedDirectKind =
+        (effectiveKind === 'DIRECT_HLS' ||
+          effectiveKind === 'DIRECT_MP4' ||
+          effectiveKind === 'DIRECT_WEBM' ||
+          effectiveKind === 'DIRECT_DASH') &&
+        declaredFmt !== 'php_endpoint' &&
+        declaredFmt !== 'html' &&
+        declaredFmt !== 'auto';
+
+      if (isConfirmedDirectKind) {
+        if (currentStatus === 'online' || currentStatus === 'active') {
+          compatible.push({
+            ...src,
+            sourceKind: effectiveKind,
+            format: src.format || classified.suggestedFormat,
+            status: 'online',
+            diagnostics: {
+              ...classified.diagnostics,
+              ...(src.diagnostics || {}),
+              directPlayable: true,
+              recommendedPlaybackMode:
+                src.diagnostics?.recommendedPlaybackMode && src.diagnostics.recommendedPlaybackMode !== 'unknown'
+                  ? src.diagnostics.recommendedPlaybackMode
+                  : classified.diagnostics.recommendedPlaybackMode
+            },
+            _compatTier: 1
+          });
+          continue;
+        }
+
+        const probe = await cachedProbeSource(targetUrl, 3500);
+        if (
+          probe.status === 'offline' ||
+          probe.status === 'unsupported_format' ||
+          probe.status === 'embed_blocked'
+        ) {
+          rejected.push({
+            id: src.id,
+            url: targetUrl,
+            reason: probe.diagnostics?.failureReason || probe.message || 'Stream direto indisponível ou inválido.',
+            status: probe.status
+          });
+          continue;
+        }
+
+        const promotedOnline = probe.status === 'online';
+        compatible.push({
+          ...src,
+          url: probe.finalUrl || targetUrl,
+          originalUrl: targetUrl,
+          sourceKind: effectiveKind,
+          format: src.format || classified.suggestedFormat,
+          status: promotedOnline ? 'online' : src.status || 'registered',
+          diagnostics: {
+            ...classified.diagnostics,
+            ...(probe.diagnostics || {}),
+            directPlayable: true,
+            recommendedPlaybackMode:
+              probe.diagnostics?.recommendedPlaybackMode && probe.diagnostics.recommendedPlaybackMode !== 'unknown'
+                ? probe.diagnostics.recommendedPlaybackMode
+                : classified.diagnostics.recommendedPlaybackMode
+          },
+          _compatTier: promotedOnline ? 1 : 2
+        });
+        continue;
+      }
+
+      if (effectiveKind === 'EMBED_PLAYER') {
+        if (src.diagnostics?.embedAllowed === false || currentStatus === 'embed_blocked') {
+          rejected.push({
+            id: src.id,
+            url: targetUrl,
+            reason: src.diagnostics?.failureReason || 'Incorporação bloqueada pelo fornecedor.',
+            status: 'embed_blocked'
+          });
+          continue;
+        }
+
+        if (currentStatus === 'online' || currentStatus === 'active') {
+          compatible.push({
+            ...src,
+            sourceKind: 'EMBED_PLAYER',
+            format: 'embed',
+            diagnostics: {
+              ...classified.diagnostics,
+              ...(src.diagnostics || {}),
+              embedAllowed: src.diagnostics?.embedAllowed ?? true,
+              recommendedPlaybackMode: 'iframe'
+            },
+            _compatTier: 3
+          });
+          continue;
+        }
+
+        const probe = await cachedProbeSource(targetUrl, 3500);
+        if (
+          probe.status === 'embed_blocked' ||
+          probe.status === 'unsupported_format' ||
+          probe.diagnostics.embedAllowed === false ||
+          (probe.status === 'offline' && (probe.diagnostics.httpStatus === 404 || probe.diagnostics.httpStatus === 410))
+        ) {
+          rejected.push({
+            id: src.id,
+            url: targetUrl,
+            reason: probe.message || 'Embed externo indisponível ou bloqueado.',
+            status: probe.status
+          });
+          continue;
+        }
+
+        compatible.push({
+          ...src,
+          url: probe.finalUrl || targetUrl,
+          sourceKind: 'EMBED_PLAYER',
+          format: 'embed',
+          status: probe.status === 'online' ? 'online' : src.status || 'registered',
+          diagnostics: {
+            ...classified.diagnostics,
+            ...probe.diagnostics,
+            embedAllowed: probe.diagnostics.embedAllowed ?? true,
+            recommendedPlaybackMode: 'iframe'
+          },
+          _compatTier: probe.status === 'online' ? 2 : 3
+        });
+        continue;
+      }
+
+      // PHP_VIDEO_ENDPOINT, WEB_PAGE, UNKNOWN, or unverified format:
+      // NEVER treat as READY without confirming real playable stream or authorized embed via HTTP inspection!
+      const probe = await cachedProbeSource(targetUrl, 4200);
+      const mode = probe.diagnostics.recommendedPlaybackMode;
+
+      if (
+        (mode === 'html5_mp4' || mode === 'html5_webm' || mode === 'hls' || mode === 'dash') &&
+        probe.diagnostics.directPlayable
+      ) {
+        compatible.push({
+          ...src,
+          url: probe.finalUrl || targetUrl,
+          originalUrl: targetUrl,
+          sourceKind: probe.sourceKind,
+          format: probe.detectedFormat,
+          status: probe.status === 'online' ? 'online' : 'online',
+          diagnostics: probe.diagnostics,
+          _compatTier: probe.status === 'online' ? 1 : 2
+        });
+        continue;
+      }
+
+      if (
+        mode === 'iframe' &&
+        probe.sourceKind === 'EMBED_PLAYER' &&
+        probe.diagnostics.embedAllowed !== false &&
+        probe.status !== 'embed_blocked'
+      ) {
+        compatible.push({
+          ...src,
+          url: probe.finalUrl || targetUrl,
+          originalUrl: targetUrl,
+          sourceKind: 'EMBED_PLAYER',
+          format: 'embed',
+          status: probe.status === 'online' ? 'online' : 'registered',
+          diagnostics: probe.diagnostics,
+          _compatTier: 3
+        });
+        continue;
+      }
+
+      rejected.push({
+        id: src.id,
+        url: targetUrl,
+        reason:
+          probe.diagnostics.failureReason ||
+          probe.message ||
+          'Fonte não confirmada como stream direto ou embed compatível.',
+        status: probe.status || 'unsupported_format'
+      });
+    }
+
+    compatible.sort((a, b) => {
+      const tierA = a._compatTier ?? 3;
+      const tierB = b._compatTier ?? 3;
+      if (tierA !== tierB) return tierA - tierB;
+      if ((b.isPrimary ? 1 : 0) !== (a.isPrimary ? 1 : 0)) {
+        return (b.isPrimary ? 1 : 0) - (a.isPrimary ? 1 : 0);
+      }
+      const prioA = typeof a.priority === 'number' ? a.priority : 999;
+      const prioB = typeof b.priority === 'number' ? b.priority : 999;
+      if (prioA !== prioB) return prioA - prioB;
+      return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
+    });
+
+    return { compatible, rejected };
+  }
+
+  function evaluateSourcesLocally(rawSources: any[]): {
+    compatible: any[];
+    rejected: Array<{ id?: string; url: string; reason: string; status: string }>;
+  } {
+    const activeCandidates = (rawSources || []).filter(src => !isSourceDisabledOrUnavailable(src));
+    const compatible: any[] = [];
+    const rejected: Array<{ id?: string; url: string; reason: string; status: string }> = [];
+
+    for (const src of activeCandidates) {
+      const targetUrl = String(src.originalUrl || src.url || '').trim();
+      if (!targetUrl) {
+        rejected.push({ id: src.id, url: '', reason: 'URL ausente.', status: 'offline' });
+        continue;
+      }
+
+      const classified = classifySourceUrl(targetUrl);
+      if (!classified.valid) {
+        rejected.push({
+          id: src.id,
+          url: targetUrl,
+          reason: classified.error || 'URL inválida.',
+          status: 'unsupported_format'
+        });
+        continue;
+      }
+
+      const currentStatus = String(src.status || 'registered').toLowerCase();
+      const effectiveKind =
+        src.sourceKind && src.sourceKind !== 'UNKNOWN' ? src.sourceKind : classified.sourceKind;
+      const isDirectKind =
+        effectiveKind === 'DIRECT_HLS' ||
+        effectiveKind === 'DIRECT_MP4' ||
+        effectiveKind === 'DIRECT_WEBM' ||
+        effectiveKind === 'DIRECT_DASH';
+      const isOnline = currentStatus === 'online' || currentStatus === 'active';
+
+      compatible.push({
+        ...src,
+        sourceKind: effectiveKind,
+        format: src.format || classified.suggestedFormat,
+        status: currentStatus,
+        diagnostics: {
+          ...classified.diagnostics,
+          ...(src.diagnostics || {})
+        },
+        _compatTier: isOnline && isDirectKind ? 1 : isOnline ? 2 : 3
+      });
+    }
+
+    compatible.sort((a, b) => {
+      const tierA = a._compatTier ?? 3;
+      const tierB = b._compatTier ?? 3;
+      if (tierA !== tierB) return tierA - tierB;
+      if ((b.isPrimary ? 1 : 0) !== (a.isPrimary ? 1 : 0)) {
+        return (b.isPrimary ? 1 : 0) - (a.isPrimary ? 1 : 0);
+      }
+      const prioA = typeof a.priority === 'number' ? a.priority : 999;
+      const prioB = typeof b.priority === 'number' ? b.priority : 999;
+      if (prioA !== prioB) return prioA - prioB;
+      return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
+    });
+
+    return { compatible, rejected };
+  }
+
+  async function resolveNextEpisodeInfo(
+    catalogItem: MediaItem,
+    tmdbId: number,
+    currentSeason: number,
+    currentEpisode: number
+  ): Promise<{ available: boolean; season: number; episode: number }> {
+    const nextInSameSeason = currentEpisode + 1;
+    const seasons = Array.isArray(catalogItem.seasons) ? catalogItem.seasons : [];
+    const curSeasonObj = seasons.find(s => Number(s.seasonNumber) === Number(currentSeason));
+
+    const hasSameSeasonEpInMeta = Boolean(
+      curSeasonObj?.episodes?.some(e => Number(e.episodeNumber) === nextInSameSeason)
+    );
+    if (hasSameSeasonEpInMeta) {
+      return { available: true, season: currentSeason, episode: nextInSameSeason };
+    }
+
+    const sameSeasonSources = mergeAndDedupeSources(
+      db.getMediaAndSources(tmdbId, 'tv', currentSeason, nextInSameSeason).sources,
+      await db.getVideoSources({
+        contentId: tmdbId,
+        contentType: 'tv',
+        seasonNumber: currentSeason,
+        episodeNumber: nextInSameSeason
+      })
+    ).filter(s => !isSourceDisabledOrUnavailable(s));
+    if (sameSeasonSources.length > 0) {
+      return { available: true, season: currentSeason, episode: nextInSameSeason };
+    }
+
+    const nextSeasonNum = currentSeason + 1;
+    const nextSeasonObj = seasons.find(s => Number(s.seasonNumber) === nextSeasonNum);
+    const firstNextSeasonEp = nextSeasonObj?.episodes?.[0]?.episodeNumber || 1;
+    if (nextSeasonObj?.episodes && nextSeasonObj.episodes.length > 0) {
+      return { available: true, season: nextSeasonNum, episode: Number(firstNextSeasonEp) };
+    }
+
+    const nextSeasonSources = mergeAndDedupeSources(
+      db.getMediaAndSources(tmdbId, 'tv', nextSeasonNum, 1).sources,
+      await db.getVideoSources({
+        contentId: tmdbId,
+        contentType: 'tv',
+        seasonNumber: nextSeasonNum,
+        episodeNumber: 1
+      })
+    ).filter(s => !isSourceDisabledOrUnavailable(s));
+    if (nextSeasonSources.length > 0) {
+      return { available: true, season: nextSeasonNum, episode: 1 };
+    }
+
+    return { available: false, season: currentSeason, episode: nextInSameSeason };
+  }
+
   async function resolveDirectPlayPayload(
     tmdbId: number,
     mediaType: 'movie' | 'tv',
@@ -1351,23 +2072,23 @@ async function startServer() {
       const mergedTv = mergeAndDedupeSources(allTvLocal, allTvVideo);
       const activeTvSources = mergedTv.filter(s => !isSourceDisabledOrUnavailable(s));
 
-      const s1e1 = activeTvSources.find(s => Number(s.season || 1) === 1 && Number(s.episode || 1) === 1);
+      const s1e1 = activeTvSources.find(s => parseSeasonParam(s.season, 1) === 1 && Number(s.episode || 1) === 1);
       if (s1e1) {
         resolvedSeason = 1;
         resolvedEpisode = 1;
       } else if (activeTvSources.length > 0) {
         const sortedByEp = [...activeTvSources].sort((a, b) => {
-          const sa = Number(a.season || 1);
-          const sb = Number(b.season || 1);
+          const sa = parseSeasonParam(a.season, 1);
+          const sb = parseSeasonParam(b.season, 1);
           if (sa !== sb) return sa - sb;
           return Number(a.episode || 1) - Number(b.episode || 1);
         });
-        resolvedSeason = Number(sortedByEp[0].season || 1);
+        resolvedSeason = parseSeasonParam(sortedByEp[0].season, 1);
         resolvedEpisode = Number(sortedByEp[0].episode || 1);
       } else {
         const firstSeason = (catalogItem.seasons || []).find(s => Number(s.seasonNumber) > 0) || catalogItem.seasons?.[0];
         const firstEp = firstSeason?.episodes?.[0];
-        resolvedSeason = Number(firstSeason?.seasonNumber || 1);
+        resolvedSeason = parseSeasonParam(firstSeason?.seasonNumber, 1);
         resolvedEpisode = Number(firstEp?.episodeNumber || 1);
       }
     }
@@ -1386,8 +2107,9 @@ async function startServer() {
     });
 
     const allSources = mergeAndDedupeSources(localSources, vSources);
-    const playableSources = allSources.filter(s => !isSourceDisabledOrUnavailable(s));
+    const { compatible: playableSources, rejected: rejectedSources } = await evaluateSourcesForPlayback(allSources);
     const mappedPlayable = playableSources.map(sanitizeSourceForApi);
+    const versionAvailability = computeVersionAvailability(allSources, playableSources, rejectedSources);
 
     const watchPath =
       mediaType === 'tv'
@@ -1441,7 +2163,8 @@ async function startServer() {
           message: 'Este conteúdo ainda não possui uma fonte de reprodução disponível.',
           content: contentSummary,
           source: null,
-          sources: []
+          sources: [],
+          versionAvailability
         }
       };
     }
@@ -1461,15 +2184,25 @@ async function startServer() {
           embedPath,
           embedUrl,
           baseUrl: OFFICIAL_BASE_URL,
-          message: 'Não foi possível reproduzir este conteúdo. Tente novamente mais tarde.',
+          message:
+            rejectedSources[0]?.reason ||
+            'Nenhuma fonte compatível e verificada para reprodução está disponível no momento.',
+          unavailableReason: rejectedSources[0]?.reason || 'Nenhuma fonte compatível disponível.',
+          registeredSourcesCount: allSources.length,
           content: contentSummary,
           source: null,
-          sources: []
+          sources: [],
+          versionAvailability
         }
       };
     }
 
     const primary = mappedPlayable[0];
+    const nextEpisode =
+      mediaType === 'tv'
+        ? await resolveNextEpisodeInfo(catalogItem, tmdbId, resolvedSeason || 1, resolvedEpisode || 1)
+        : undefined;
+
     return {
       httpStatus: 200,
       payload: {
@@ -1489,10 +2222,8 @@ async function startServer() {
         source: primary,
         sources: mappedPlayable,
         alternativeSources: mappedPlayable.slice(1),
-        nextEpisode:
-          mediaType === 'tv'
-            ? { available: true, season: resolvedSeason, episode: (resolvedEpisode || 1) + 1 }
-            : undefined
+        nextEpisode,
+        versionAvailability
       }
     };
   }
@@ -1569,7 +2300,7 @@ async function startServer() {
       }
       const rawType = String(type || 'movie').toLowerCase();
       const mediaType: 'movie' | 'tv' = rawType === 'tv' || rawType === 'series' || rawType === 'serie' ? 'tv' : 'movie';
-      const sNum = mediaType === 'tv' ? Math.max(0, parseInt(String(season || 1), 10) || 1) : undefined;
+      const sNum = mediaType === 'tv' ? parseSeasonParam(season, 1) : undefined;
       const eNum = mediaType === 'tv' ? Math.max(1, parseInt(String(episode || 1), 10) || 1) : undefined;
 
       const resolved = await resolveDirectPlayPayload(numId, mediaType, sNum, eNum);
@@ -1682,12 +2413,13 @@ async function startServer() {
       return res.status(404).json({ error: 'Série não encontrada' });
     }
 
-    const sNum = parseInt(seasonNumber);
-    const tmdbSeason = await fetchTMDB(`/tv/${item.tmdbId}/season/${sNum}`);
+    const sNum = parseSeasonParam(seasonNumber, 1);
+    const tmdbSeason = item.tmdbId ? await fetchTMDB(`/tv/${item.tmdbId}/season/${sNum}`) : null;
 
-    if (tmdbSeason && tmdbSeason.episodes) {
+    if (tmdbSeason && Array.isArray(tmdbSeason.episodes)) {
       const episodes = tmdbSeason.episodes.map((ep: any) => ({
         id: `ep-${ep.id}`,
+        tmdbId: item.tmdbId,
         seasonNumber: sNum,
         episodeNumber: ep.episode_number,
         title: ep.name || `Episódio ${ep.episode_number}`,
@@ -1698,68 +2430,122 @@ async function startServer() {
         voteAverage: ep.vote_average ? Number(ep.vote_average.toFixed(1)) : undefined
       }));
 
-      // Update season in DB item
-      if (item.seasons) {
-        const sIndex = item.seasons.findIndex(s => s.seasonNumber === sNum);
-        if (sIndex >= 0) {
-          item.seasons[sIndex].episodes = episodes;
-        } else {
-          item.seasons.push({
-            id: `season-${sNum}`,
-            seasonNumber: sNum,
-            name: tmdbSeason.name || `Temporada ${sNum}`,
-            episodeCount: episodes.length,
-            episodes
-          });
-        }
-        db.upsertMediaItem(item as any);
+      // Update season in DB item cleanly via upsert (merging preserves existing metadata)
+      const existingSeasons = Array.isArray(item.seasons) ? [...item.seasons] : [];
+      const sIndex = existingSeasons.findIndex(s => Number(s.seasonNumber) === sNum);
+      if (sIndex >= 0) {
+        existingSeasons[sIndex] = {
+          ...existingSeasons[sIndex],
+          episodeCount: Math.max(Number(existingSeasons[sIndex].episodeCount || 0), episodes.length),
+          episodes
+        };
+      } else {
+        existingSeasons.push({
+          id: `season-${sNum}`,
+          seasonNumber: sNum,
+          name: tmdbSeason.name || (sNum === 0 ? 'Especiais' : `Temporada ${sNum}`),
+          episodeCount: episodes.length,
+          episodes
+        });
       }
+      db.upsertMediaItem({ ...item, type: 'tv', seasons: existingSeasons } as any);
 
       return res.json({ seasonNumber: sNum, episodes });
     }
 
-    res.json({ seasonNumber: sNum, episodes: [] });
+    // Fallback to already-hydrated local episodes if TMDB is offline/unavailable
+    const localSeason = (item.seasons || []).find(s => Number(s.seasonNumber) === sNum);
+    res.json({ seasonNumber: sNum, episodes: localSeason?.episodes || [] });
   });
 
-  // 2-STAGE SEARCH ENGINE (1st local catalog, 2nd TMDB)
+  // 2-STAGE SEARCH ENGINE (1st local catalog, 2nd TMDB with pagination + smart filters)
   app.get('/api/search', async (req: Request, res: Response) => {
     const queryStr = (req.query.q as string || '').trim();
     const filterType = (req.query.type as string || 'all');
+    const filterCategory = (req.query.category as string || 'all');
+    const sortParam = (req.query.sort as string || 'recent');
+    const yearParam = req.query.year ? parseInt(String(req.query.year), 10) : undefined;
+    const seasonParam = req.query.season !== undefined && req.query.season !== '' ? parseInt(String(req.query.season), 10) : undefined;
+    const episodeParam = req.query.episode !== undefined && req.query.episode !== '' ? parseInt(String(req.query.episode), 10) : undefined;
+    const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
 
-    if (!queryStr) {
-      return res.json({ local: [], external: [], total: 0 });
+    if (!queryStr && (!filterCategory || filterCategory === 'all') && seasonParam === undefined && yearParam === undefined) {
+      return res.json({ local: [], external: [], total: 0, page: 1, totalPages: 1 });
     }
 
-    // Step 1: Search local catalog
-    const localResults = db.getCatalog({ search: queryStr, type: filterType, limit: 30 });
+    const localResults = page === 1
+      ? db.getCatalog({
+          search: queryStr || undefined,
+          type: filterType,
+          category: filterCategory,
+          season: seasonParam !== undefined && !isNaN(seasonParam) ? seasonParam : undefined,
+          episode: episodeParam !== undefined && !isNaN(episodeParam) ? episodeParam : undefined,
+          yearFrom: yearParam && !isNaN(yearParam) ? yearParam : undefined,
+          yearTo: yearParam && !isNaN(yearParam) ? yearParam : undefined,
+          sort: sortParam,
+          limit: 100
+        })
+      : { items: [], total: 0 };
 
-    // Step 2: If local results fewer than 10, search TMDB for recommendations
     let externalResults: any[] = [];
-    if (localResults.items.length < 10) {
+    let totalPages = 1;
+    const hasSeasonEpisodeFilter = (seasonParam !== undefined && !isNaN(seasonParam)) || (episodeParam !== undefined && !isNaN(episodeParam));
+    if (queryStr && !hasSeasonEpisodeFilter && (localResults.items.length < 20 || page > 1)) {
       if (filterType === 'movie' || filterType === 'all') {
-        const movieSearch = await fetchTMDB('/search/movie', { query: queryStr });
+        const movieSearch = await fetchTMDB('/search/movie', { query: queryStr, page: String(page) });
         if (movieSearch?.results) {
-          const formattedMovies = movieSearch.results.slice(0, 8).map((m: any) => formatTMDBMedia(m, 'movie'));
+          totalPages = Math.max(totalPages, Number(movieSearch.total_pages || 1));
+          const formattedMovies = movieSearch.results.map((m: any) => {
+            const formatted = formatTMDBMedia(m, 'movie');
+            const det = detectContentCategory(m, 'movie');
+            return {
+              ...formatted,
+              id: `tmdb-movie-${formatted.tmdbId}`,
+              categories: det.suggestedCategories,
+              inCatalog: false,
+              hasPlayableSource: false
+            };
+          });
           externalResults.push(...formattedMovies);
         }
       }
       if (filterType === 'tv' || filterType === 'all') {
-        const tvSearch = await fetchTMDB('/search/tv', { query: queryStr });
+        const tvSearch = await fetchTMDB('/search/tv', { query: queryStr, page: String(page) });
         if (tvSearch?.results) {
-          const formattedSeries = tvSearch.results.slice(0, 8).map((t: any) => formatTMDBMedia(t, 'tv'));
+          totalPages = Math.max(totalPages, Number(tvSearch.total_pages || 1));
+          const formattedSeries = tvSearch.results.map((t: any) => {
+            const formatted = formatTMDBMedia(t, 'tv');
+            const det = detectContentCategory(t, 'tv');
+            return {
+              ...formatted,
+              id: `tmdb-tv-${formatted.tmdbId}`,
+              categories: det.suggestedCategories,
+              inCatalog: false,
+              hasPlayableSource: false
+            };
+          });
           externalResults.push(...formattedSeries);
         }
       }
     }
 
-    // Filter out external items that are already in local catalog
-    const localTmdbIds = new Set(localResults.items.map(i => i.tmdbId));
-    externalResults = externalResults.filter(ext => !localTmdbIds.has(ext.tmdbId));
+    if (yearParam && !isNaN(yearParam)) {
+      externalResults = externalResults.filter(ext => ext.releaseYear === yearParam);
+    }
+    if (filterCategory && filterCategory !== 'all') {
+      const c = filterCategory.toLowerCase();
+      externalResults = externalResults.filter(ext => Array.isArray(ext.categories) && ext.categories.includes(c === 'animes' ? 'anime' : c === 'doramas' ? 'dorama' : c));
+    }
+
+    const localTmdbKeys = new Set(localResults.items.map(i => `${i.tmdbId}:${i.type === 'movie' ? 'movie' : 'tv'}`));
+    externalResults = externalResults.filter(ext => !localTmdbKeys.has(`${ext.tmdbId}:${ext.type}`));
 
     res.json({
       local: localResults.items,
       external: externalResults,
-      total: localResults.items.length + externalResults.length
+      total: localResults.items.length + externalResults.length,
+      page,
+      totalPages
     });
   });
 
@@ -1813,35 +2599,33 @@ async function startServer() {
     const resolvedMedia = mediaItem;
 
     if (allSources.length > 0) {
-      const isDisabledStatus = (src: any) => {
-        if (src?.enabled === false) return true;
-        const lower = (src?.status || '').toLowerCase();
-        return lower === 'inactive' || lower === 'offline' || lower === 'embed_blocked' || lower === 'unsupported_format';
-      };
-
-      const playableSources = allSources.filter(src => !isDisabledStatus(src));
+      const { compatible: playableSources, rejected: rejectedSources } = await evaluateSourcesForPlayback(allSources);
       const isPlayable = playableSources.length > 0;
-      const primary = playableSources[0];
+      const versionAvailability = computeVersionAvailability(allSources, playableSources, rejectedSources);
+      const requestedVersion =
+        typeof language === 'string' && language.trim()
+          ? normalizeVersionType(language)
+          : undefined;
+
       const mappedPlayable = playableSources.map(src => ({
-        id: src.id,
-        url: src.url,
+        ...sanitizeSourceForApi(src),
         originalUrl: src.originalUrl || src.url,
         sourceKind: src.sourceKind,
-        type: src.format || 'auto',
-        format: src.format || 'auto',
-        provider: src.provider || src.serverName || 'Servidor Oficial',
-        serverName: src.serverName || src.provider || 'Servidor Oficial',
-        label: src.label || src.serverName || 'Servidor Principal',
-        quality: src.quality || '1080p',
-        audioLanguage: src.audioLanguage || 'Português',
-        isPrimary: src.isPrimary ?? false,
-        priority: typeof src.priority === 'number' ? src.priority : 1,
-        enabled: src.enabled !== false,
         status: src.status || 'registered',
         diagnostics: src.diagnostics
       }));
 
-      const primaryMapped = primary ? (mappedPlayable.find(m => m.id === primary.id) || mappedPlayable[0]) : null;
+      if (requestedVersion === 'dublado' || requestedVersion === 'legendado') {
+        mappedPlayable.sort((a, b) => {
+          const aVer = normalizeVersionType(a.versionType, a.serverName || a.label, a.audioLanguage);
+          const bVer = normalizeVersionType(b.versionType, b.serverName || b.label, b.audioLanguage);
+          const aMatch = aVer === requestedVersion ? 1 : 0;
+          const bMatch = bVer === requestedVersion ? 1 : 0;
+          return bMatch - aMatch;
+        });
+      }
+
+      const primaryMapped = mappedPlayable[0] || null;
 
       return res.json({
         success: isPlayable,
@@ -1863,9 +2647,11 @@ async function startServer() {
         alternativeSources: isPlayable ? mappedPlayable.slice(1) : [],
         nextEpisode: t === 'tv' ? { available: true, season: s, episode: ep + 1 } : undefined,
         statusReason: isPlayable ? 'available' : 'offline',
+        unavailableReason: !isPlayable ? rejectedSources[0]?.reason : undefined,
+        versionAvailability,
         message: isPlayable
           ? 'Fonte de vídeo obtida com sucesso'
-          : 'Não foi possível reproduzir este conteúdo. Tente novamente mais tarde.',
+          : rejectedSources[0]?.reason || 'Não foi possível reproduzir este conteúdo. Tente novamente mais tarde.',
         tmdbId: id,
         type: t,
         season: s,
@@ -1877,8 +2663,10 @@ async function startServer() {
     // When content exists in catalog but truly 0 sources exist in database
     res.json({
       success: false,
+      code: 'NO_SOURCE_AVAILABLE',
       contentNotFound: false,
       statusReason: 'no_source',
+      versionAvailability: computeVersionAvailability([], [], []),
       content: {
         id: resolvedMedia.id,
         title: resolvedMedia.title,
@@ -2300,6 +3088,39 @@ async function startServer() {
     res.json(list);
   });
 
+  app.delete(['/api/user/progress/:userId', '/api/progress/:userId'], (req: Request, res: Response) => {
+    const userId = req.params.userId;
+    const tmdbId = Number(req.query.tmdbId || req.body?.tmdbId || 0);
+    const mediaType = String(req.query.mediaType || req.body?.mediaType || 'movie');
+    const rawSeason = req.query.seasonNumber ?? req.query.season ?? req.body?.seasonNumber ?? req.body?.season;
+    const rawEpisode = req.query.episodeNumber ?? req.query.episode ?? req.body?.episodeNumber ?? req.body?.episode;
+    const seasonNumber = rawSeason !== undefined ? Number(rawSeason) : undefined;
+    const episodeNumber = rawEpisode !== undefined ? Number(rawEpisode) : undefined;
+
+    if (!userId || !tmdbId) {
+      return res.status(400).json({ error: 'userId e tmdbId são obrigatórios para reiniciar progresso.' });
+    }
+    const result = db.resetWatchProgress(userId, { tmdbId, mediaType, seasonNumber, episodeNumber });
+    res.json({ success: true, ...result });
+  });
+
+  app.post(['/api/user/progress/reset', '/api/progress/reset'], (req: Request, res: Response) => {
+    const body = req.body || {};
+    const { userId, tmdbId, mediaType } = body;
+    const rawSeason = body.seasonNumber ?? body.season;
+    const rawEpisode = body.episodeNumber ?? body.episode;
+    if (!userId || !tmdbId) {
+      return res.status(400).json({ error: 'userId e tmdbId são obrigatórios.' });
+    }
+    const result = db.resetWatchProgress(String(userId), {
+      tmdbId: Number(tmdbId),
+      mediaType: String(mediaType || 'movie'),
+      seasonNumber: rawSeason !== undefined ? Number(rawSeason) : undefined,
+      episodeNumber: rawEpisode !== undefined ? Number(rawEpisode) : undefined
+    });
+    res.json({ success: true, ...result });
+  });
+
   app.post(['/api/user/history', '/api/history'], (req: Request, res: Response) => {
     const { userId, ...itemData } = req.body;
     if (!userId || !itemData.tmdbId) {
@@ -2512,11 +3333,43 @@ async function startServer() {
     res.json({ status: 'STOPPED' });
   });
 
-  app.get('/api/admin/recovery/backup/download', requireFounder, (req: Request, res: Response) => {
-    const backup = db.exportCatalogBackup();
-    res.setHeader('Content-Type', 'application/json');
-    res.setHeader('Content-Disposition', `attachment; filename=playfilme-backup-${new Date().toISOString().slice(0, 10)}.json`);
-    res.json(backup);
+  app.get('/api/admin/recovery/backup/download-token', requireFounder, (req: Request, res: Response) => {
+    const token = createBackupDownloadToken('__recovery_latest__', 300);
+    res.json({
+      success: true,
+      token,
+      downloadUrl: `/api/admin/recovery/backup/download?token=${encodeURIComponent(token)}`
+    });
+  });
+
+  app.get('/api/admin/recovery/backup/download', (req: Request, res: Response) => {
+    const queryToken = String(req.query.token || '').trim();
+    const authHeader = String(req.headers.authorization || '').replace('Bearer ', '').trim();
+    const sessionOk = Boolean(verifySessionToken(authHeader));
+    const tokenOk = queryToken ? verifyBackupDownloadToken(queryToken, '__recovery_latest__') : false;
+
+    if (!sessionOk && !tokenOk) {
+      return res.status(401).json({ error: 'Não autorizado para descarregar backup.' });
+    }
+
+    const snap = db.getFullSafeExportSnapshot('catalog');
+    const backup = {
+      exportedAt: new Date().toISOString(),
+      platform: 'RONYCINE API',
+      totalItems: snap.media.length,
+      media: snap.media,
+      videoSources: snap.videoSources,
+      playerSources: snap.playerSources,
+      seasonSourceTemplates: snap.seasonSourceTemplates
+    };
+    const jsonBuf = Buffer.from(JSON.stringify(backup, null, 2), 'utf-8');
+    const filename = `ronycine-catalog-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(filename)}`);
+    res.setHeader('Content-Length', String(jsonBuf.length));
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(jsonBuf);
   });
 
   app.post('/api/admin/recovery/backup/restore', requireFounder, (req: Request, res: Response) => {
@@ -2530,31 +3383,251 @@ async function startServer() {
     }
   });
 
-  // Backup Center Routes
+  // ==========================================
+  // BACKUP CENTER PRO MAX ROUTES (ZIP / JSON / CSV / XLSX)
+  // ==========================================
   app.get('/api/admin/backups', requireAdmin, (req: Request, res: Response) => {
-    const backups = db.getBackups();
+    const backups = getAllBackupHistory();
     res.json({ success: true, backups });
   });
 
-  app.post('/api/admin/backups', requireAdmin, (req: Request, res: Response) => {
-    const { categories, type } = req.body || {};
-    const adminEmail = (req.headers['x-user-email'] as string) || ADMIN_EMAIL;
-    const backup = db.createBackup(categories || ['movies', 'series'], type || 'manual', adminEmail);
-    res.json({ success: true, backup });
+  app.get('/api/admin/backups/system-status', requireAdmin, (req: Request, res: Response) => {
+    res.json({ success: true, status: getBackupSystemStatus() });
   });
 
-  app.post('/api/admin/backups/:id/restore', requireFounder, (req: Request, res: Response) => {
-    const adminEmail = (req.headers['x-user-email'] as string) || ADMIN_EMAIL;
-    const report = db.restoreBackup(req.params.id, adminEmail);
-    if (!report) {
+  app.put('/api/admin/backups/config', requireAdmin, (req: Request, res: Response) => {
+    const { autoBackupEnabled, autoBackupIntervalHours } = req.body || {};
+    const cfg = db.updateBackupConfig({
+      ...(autoBackupEnabled !== undefined ? { autoBackupEnabled: Boolean(autoBackupEnabled) } : {}),
+      ...(autoBackupIntervalHours !== undefined
+        ? { autoBackupIntervalHours: Math.max(1, Number(autoBackupIntervalHours) || 24) }
+        : {})
+    });
+    res.json({ success: true, config: cfg, status: getBackupSystemStatus() });
+  });
+
+  app.post('/api/admin/backups/export', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const rawMode = String(req.body?.mode || 'full').toLowerCase();
+      const rawFormat = String(req.body?.format || 'zip').toLowerCase();
+      const mode = rawMode === 'catalog' ? 'catalog' : 'full';
+      const format =
+        rawFormat === 'json' || rawFormat === 'csv' || rawFormat === 'xlsx' ? rawFormat : 'zip';
+      const adminEmail = (req as any).user?.email || (req.headers['x-user-email'] as string) || ADMIN_EMAIL;
+
+      const record = await createBackupArchive(mode, format, adminEmail, 'manual');
+      const token = createBackupDownloadToken(record.id, 300);
+      res.json({
+        success: true,
+        backup: record,
+        downloadToken: token,
+        downloadUrl: `/api/admin/backups/${record.id}/download?token=${encodeURIComponent(token)}`
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err?.message || 'Falha ao gerar backup.' });
+    }
+  });
+
+  // Legacy POST /api/admin/backups preserved cleanly (also persists a real archive when possible)
+  app.post('/api/admin/backups', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const { categories, mode, format } = req.body || {};
+      const adminEmail = (req as any).user?.email || (req.headers['x-user-email'] as string) || ADMIN_EMAIL;
+      if (mode || format) {
+        const resolvedMode = mode === 'catalog' ? 'catalog' : 'full';
+        const resolvedFmt = format === 'json' || format === 'csv' || format === 'xlsx' ? format : 'zip';
+        const record = await createBackupArchive(resolvedMode, resolvedFmt, adminEmail, 'manual');
+        const token = createBackupDownloadToken(record.id, 300);
+        return res.json({
+          success: true,
+          backup: record,
+          downloadToken: token,
+          downloadUrl: `/api/admin/backups/${record.id}/download?token=${encodeURIComponent(token)}`
+        });
+      }
+      const hasFull = Array.isArray(categories) && (categories.includes('settings') || categories.includes('apps'));
+      const record = await createBackupArchive(hasFull ? 'full' : 'catalog', 'zip', adminEmail, 'manual');
+      const token = createBackupDownloadToken(record.id, 300);
+      res.json({
+        success: true,
+        backup: record,
+        downloadToken: token,
+        downloadUrl: `/api/admin/backups/${record.id}/download?token=${encodeURIComponent(token)}`
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err?.message || 'Erro ao criar backup.' });
+    }
+  });
+
+  app.get('/api/admin/backups/:id/download-token', requireAdmin, (req: Request, res: Response) => {
+    const resolved = resolveBackupFileForDownload(req.params.id);
+    if (!resolved) {
+      return res.status(404).json({ success: false, error: 'Backup não encontrado no armazenamento.' });
+    }
+    const token = createBackupDownloadToken(req.params.id, 300);
+    res.json({
+      success: true,
+      token,
+      filename: resolved.record.filename,
+      mimeType: resolved.record.mimeType,
+      sizeBytes: resolved.record.sizeBytes,
+      downloadUrl: `/api/admin/backups/${req.params.id}/download?token=${encodeURIComponent(token)}`
+    });
+  });
+
+  app.get('/api/admin/backups/:id/download', (req: Request, res: Response) => {
+    const backupId = req.params.id;
+    const queryToken = String(req.query.token || '').trim();
+    const authHeader = String(req.headers.authorization || '').replace('Bearer ', '').trim();
+    const sessionUser = verifySessionToken(authHeader);
+    const sessionOk = Boolean(sessionUser && (sessionUser.role === 'admin' || sessionUser.role === 'founder' || isFounderEmail(sessionUser.email)));
+    const tokenOk = queryToken ? verifyBackupDownloadToken(queryToken, backupId) : false;
+
+    if (!sessionOk && !tokenOk) {
+      return res.status(401).json({ success: false, error: 'Token de download inválido ou expirado. Tente novamente.' });
+    }
+
+    const resolved = resolveBackupFileForDownload(backupId);
+    if (!resolved) {
+      return res.status(404).json({ success: false, error: 'Ficheiro de backup não encontrado.' });
+    }
+
+    const { record, filePath, inlineBuffer } = resolved;
+    const encodedName = encodeURIComponent(record.filename);
+    res.setHeader('Content-Type', record.mimeType || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `attachment; filename="${record.filename}"; filename*=UTF-8''${encodedName}`);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'no-store');
+
+    if (inlineBuffer) {
+      res.setHeader('Content-Length', String(inlineBuffer.length));
+      return res.send(inlineBuffer);
+    }
+
+    if (filePath && fs.existsSync(filePath)) {
+      const stat = fs.statSync(filePath);
+      res.setHeader('Content-Length', String(stat.size));
+      return fs.createReadStream(filePath).pipe(res);
+    }
+
+    return res.status(404).json({ success: false, error: 'Arquivo físico de backup indisponível.' });
+  });
+
+  app.post(
+    '/api/admin/backups/analyze',
+    requireAdmin,
+    (req: Request, res: Response, next) => {
+      backupUpload.single('file')(req, res, (err: any) => {
+        if (err) {
+          return res.status(400).json({
+            success: false,
+            error: err?.code === 'LIMIT_FILE_SIZE' ? 'O ficheiro excede o limite de 200 MB.' : err?.message || 'Erro no upload.'
+          });
+        }
+        next();
+      });
+    },
+    async (req: Request, res: Response) => {
+      try {
+        if (!req.file || !req.file.buffer) {
+          return res.status(400).json({ success: false, error: 'Nenhum ficheiro recebido para análise.' });
+        }
+        const preview = await analyzeBackupUpload(
+          req.file.buffer,
+          req.file.originalname || 'backup',
+          req.file.mimetype
+        );
+        res.json({ success: true, preview });
+      } catch (err: any) {
+        res.status(400).json({
+          success: false,
+          error: err?.message || 'Ficheiro inválido ou corrompido.'
+        });
+      }
+    }
+  );
+
+  app.post('/api/admin/backups/import', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const { uploadToken, filter, conflictMode } = req.body || {};
+      if (!uploadToken || typeof uploadToken !== 'string') {
+        return res.status(400).json({ success: false, error: 'uploadToken é obrigatório. Analise o ficheiro primeiro.' });
+      }
+      const adminEmail = (req as any).user?.email || (req.headers['x-user-email'] as string) || ADMIN_EMAIL;
+      const validFilter = filter === 'movies' || filter === 'series' ? filter : 'all';
+      const validConflict =
+        conflictMode === 'update_metadata_keep_links' ||
+        conflictMode === 'merge_new_links' ||
+        conflictMode === 'overwrite'
+          ? conflictMode
+          : 'skip';
+
+      const job = await startBackupImportJob({
+        uploadToken,
+        filter: validFilter,
+        conflictMode: validConflict,
+        adminEmail
+      });
+      invalidatePublicTrendingCache();
+      res.json({ success: true, job });
+    } catch (err: any) {
+      res.status(400).json({ success: false, error: err?.message || 'Erro ao iniciar importação de backup.' });
+    }
+  });
+
+  app.get('/api/admin/backups/import-jobs', requireAdmin, (req: Request, res: Response) => {
+    res.json({ success: true, jobs: listImportJobs() });
+  });
+
+  app.get('/api/admin/backups/import-jobs/:jobId', requireAdmin, (req: Request, res: Response) => {
+    const job = getImportJobStatus(req.params.jobId);
+    if (!job) return res.status(404).json({ success: false, error: 'Operação de importação não encontrada.' });
+    res.json({ success: true, job });
+  });
+
+  app.post('/api/admin/backups/import-jobs/:jobId/cancel', requireAdmin, (req: Request, res: Response) => {
+    const job = cancelImportJob(req.params.jobId);
+    if (!job) return res.status(404).json({ success: false, error: 'Operação não encontrada.' });
+    res.json({ success: true, job });
+  });
+
+  app.post('/api/admin/backups/import-jobs/:jobId/resume', requireAdmin, (req: Request, res: Response) => {
+    const adminEmail = (req as any).user?.email || ADMIN_EMAIL;
+    const job = resumeImportJob(req.params.jobId, adminEmail);
+    if (!job) return res.status(404).json({ success: false, error: 'Operação não encontrada.' });
+    res.json({ success: true, job });
+  });
+
+  app.post('/api/admin/backups/:id/restore', requireAdmin, async (req: Request, res: Response) => {
+    const resolved = resolveBackupFileForDownload(req.params.id);
+    if (!resolved) {
       return res.status(404).json({ success: false, error: 'Backup não encontrado.' });
     }
-    res.json({ success: true, report });
+    const adminEmail = (req as any).user?.email || (req.headers['x-user-email'] as string) || ADMIN_EMAIL;
+    if (resolved.inlineBuffer) {
+      const report = db.restoreBackup(req.params.id, adminEmail);
+      invalidatePublicTrendingCache();
+      return res.json({ success: true, report });
+    }
+    try {
+      const buf = fs.readFileSync(resolved.filePath!);
+      const preview = await analyzeBackupUpload(buf, resolved.record.filename, resolved.record.mimeType);
+      const job = await startBackupImportJob({
+        uploadToken: preview.uploadToken,
+        filter: 'all',
+        conflictMode: req.body?.conflictMode || 'merge_new_links',
+        adminEmail
+      });
+      invalidatePublicTrendingCache();
+      res.json({ success: true, job, message: 'Restauração iniciada com snapshot de segurança.' });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err?.message || 'Falha ao restaurar backup.' });
+    }
   });
 
-  app.delete('/api/admin/backups/:id', requireFounder, (req: Request, res: Response) => {
-    const adminEmail = (req.headers['x-user-email'] as string) || ADMIN_EMAIL;
-    const success = db.deleteBackup(req.params.id, adminEmail);
+  app.delete('/api/admin/backups/:id', requireAdmin, (req: Request, res: Response) => {
+    const adminEmail = (req as any).user?.email || (req.headers['x-user-email'] as string) || ADMIN_EMAIL;
+    const success = deleteBackupRecordAndFile(req.params.id, adminEmail);
     res.json({ success });
   });
 
@@ -2594,10 +3667,6 @@ async function startServer() {
   });
 
   // --- SMART TMDB IMPORTER API ENDPOINTS ---
-
-  // Cache for TMDB lists
-  const tmdbListCache = new Map<string, { timestamp: number; data: any }>();
-  const TMDB_LIST_CACHE_TTL = 2 * 60 * 60 * 1000; // 2 hours
 
   // 0. TMDB Connection Diagnostic & Status
   async function checkTmdbConnectionStatus(): Promise<{
@@ -2685,25 +3754,28 @@ async function startServer() {
     res.json(diag);
   });
 
-  // 1. TMDB Search with Debounce, Cache & Duplication Detection
+  // 1. TMDB Search with Debounce, Cache, Duplication Detection & Pagination (no arbitrary slice limits)
   app.get('/api/admin/tmdb/search', requireAdmin, async (req: Request, res: Response) => {
     const rawQuery = (req.query.q as string || '').trim();
     const filterType = (req.query.type as string || 'all'); // 'all' | 'movie' | 'tv'
+    const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
 
     if (!rawQuery) {
-      return res.json({ results: [] });
+      return res.json({ results: [], page: 1, totalPages: 1, totalResults: 0 });
     }
 
     const normalized = normalizeSearchQuery(rawQuery);
-    const cacheKey = `${normalized}_${filterType}`;
+    const cacheKey = `${normalized}_${filterType}_p${page}`;
     const cached = searchCache.get(cacheKey);
 
     if (cached && Date.now() - cached.timestamp < SEARCH_CACHE_TTL_MS) {
-      return res.json({ results: cached.data });
+      return res.json(cached.data);
     }
 
     const results: any[] = [];
     const seenTmdbKeys = new Set<string>();
+    let maxTotalPages = 1;
+    let totalResultsCount = 0;
 
     const addUniqueResult = (item: any) => {
       if (!item || !item.tmdbId) return;
@@ -2714,9 +3786,8 @@ async function startServer() {
       }
     };
 
-    // Check if user entered a direct numeric TMDB ID (strictly numeric digits)
     const isStrictNumeric = /^\d+$/.test(rawQuery);
-    if (isStrictNumeric) {
+    if (isStrictNumeric && page === 1) {
       const directNumericId = parseInt(rawQuery, 10);
       const typesToTry: Array<'movie' | 'tv'> = filterType === 'movie' ? ['movie'] : (filterType === 'tv' ? ['tv'] : ['tv', 'movie']);
       for (const t of typesToTry) {
@@ -2726,45 +3797,38 @@ async function startServer() {
             const formatted = formatTMDBMedia(item, t);
             addUniqueResult(formatted);
           }
-        } catch (e) {
-          // ignore lookup error
-        }
+        } catch {}
       }
     }
 
-    // Always also search by Name/Title (if not strictly numeric or if direct lookup returned 0 results)
     if (results.length === 0 || !isStrictNumeric) {
       if (filterType === 'tv' || filterType === 'all') {
-        const tvRes = await fetchTMDB('/search/tv', { query: rawQuery });
+        let tvRes = await fetchTMDB('/search/tv', { query: rawQuery, page: String(page) });
+        if (!tvRes?.results?.length && page === 1) {
+          tvRes = await fetchTMDB('/search/tv', { query: rawQuery, language: 'en-US', page: String(page) });
+        }
         if (tvRes?.results?.length) {
-          const tvs = tvRes.results.slice(0, 15).map((t: any) => formatTMDBMedia(t, 'tv'));
+          maxTotalPages = Math.max(maxTotalPages, Number(tvRes.total_pages || 1));
+          totalResultsCount += Number(tvRes.total_results || tvRes.results.length);
+          const tvs = tvRes.results.map((t: any) => formatTMDBMedia(t, 'tv'));
           tvs.forEach(addUniqueResult);
-        } else {
-          // Fallback search without language constraint
-          const fallbackRes = await fetchTMDB('/search/tv', { query: rawQuery, language: 'en-US' });
-          if (fallbackRes?.results?.length) {
-            const tvs = fallbackRes.results.slice(0, 15).map((t: any) => formatTMDBMedia(t, 'tv'));
-            tvs.forEach(addUniqueResult);
-          }
         }
       }
 
       if (filterType === 'movie' || filterType === 'all') {
-        const movieRes = await fetchTMDB('/search/movie', { query: rawQuery });
+        let movieRes = await fetchTMDB('/search/movie', { query: rawQuery, page: String(page) });
+        if (!movieRes?.results?.length && page === 1) {
+          movieRes = await fetchTMDB('/search/movie', { query: rawQuery, language: 'en-US', page: String(page) });
+        }
         if (movieRes?.results?.length) {
-          const movies = movieRes.results.slice(0, 15).map((m: any) => formatTMDBMedia(m, 'movie'));
+          maxTotalPages = Math.max(maxTotalPages, Number(movieRes.total_pages || 1));
+          totalResultsCount += Number(movieRes.total_results || movieRes.results.length);
+          const movies = movieRes.results.map((m: any) => formatTMDBMedia(m, 'movie'));
           movies.forEach(addUniqueResult);
-        } else {
-          const fallbackMovieRes = await fetchTMDB('/search/movie', { query: rawQuery, language: 'en-US' });
-          if (fallbackMovieRes?.results?.length) {
-            const movies = fallbackMovieRes.results.slice(0, 15).map((m: any) => formatTMDBMedia(m, 'movie'));
-            movies.forEach(addUniqueResult);
-          }
         }
       }
     }
 
-    // Attach Duplication Check for each result
     const enrichedResults = results.map((item) => {
       const existing = db.getMediaByTmdbAndType(item.tmdbId, item.type);
       return {
@@ -2779,13 +3843,18 @@ async function startServer() {
       };
     });
 
-    // Bounded searchCache (max 500 entries)
     if (searchCache.size > 500) {
       const oldestKey = searchCache.keys().next().value;
       if (oldestKey) searchCache.delete(oldestKey);
     }
-    searchCache.set(cacheKey, { timestamp: Date.now(), data: enrichedResults });
-    res.json({ results: enrichedResults });
+    const payload = {
+      results: enrichedResults,
+      page,
+      totalPages: maxTotalPages,
+      totalResults: Math.max(totalResultsCount, enrichedResults.length)
+    };
+    searchCache.set(cacheKey, { timestamp: Date.now(), data: payload });
+    res.json(payload);
   });
 
   // 1.1 TMDB Lists (Trending, Popular, Recent)
@@ -2861,12 +3930,260 @@ async function startServer() {
 
     const formatted = formatTMDBMedia(tmdbData, type);
     const existing = db.getMediaByTmdbAndType(tmdbId, type);
+    const comparisonStats =
+      type === 'tv' ? db.getSeriesComparisonStats(tmdbId, formatted.seasons) : undefined;
 
     res.json({
       item: formatted,
       existsInCatalog: !!existing,
-      existingMediaItem: existing || null
+      existingMediaItem: existing || null,
+      detection: detectContentCategory(tmdbData, type),
+      comparisonStats
     });
+  });
+
+  // 2.0 Smart Content Detection (DETEÇÃO INTELIGENTE — Manual Admin Preview Only, Zero Auto-Import)
+  app.get('/api/admin/tmdb/detect', requireAdmin, async (req: Request, res: Response) => {
+    const rawQuery = String(req.query.query || req.query.q || '').trim();
+    const explicitId = req.query.tmdbId ? parseInt(String(req.query.tmdbId), 10) : NaN;
+    const explicitType = req.query.type === 'movie' || req.query.type === 'tv' ? req.query.type : undefined;
+
+    if (!rawQuery && isNaN(explicitId)) {
+      return res.status(400).json({ error: 'Informe um título ou TMDB ID para análise inteligente.' });
+    }
+
+    const buildCandidate = (raw: any, mediaType: 'movie' | 'tv') => {
+      const formatted = formatTMDBMedia(raw, mediaType);
+      const detection = detectContentCategory(raw, mediaType);
+      const existing = db.getMediaByTmdbAndType(Number(formatted.tmdbId), mediaType);
+      return {
+        tmdbId: formatted.tmdbId,
+        type: mediaType,
+        title: formatted.title,
+        originalTitle: formatted.originalTitle,
+        posterPath: formatted.posterPath,
+        backdropPath: formatted.backdropPath,
+        releaseYear: formatted.releaseYear,
+        releaseDate: formatted.releaseDate,
+        firstAirDate: formatted.firstAirDate,
+        voteAverage: formatted.voteAverage,
+        popularity: formatted.popularity,
+        genres: formatted.genres,
+        originCountry: formatted.originCountry || detection.originCountry,
+        originalLanguage: formatted.originalLanguage || detection.originalLanguage,
+        overview: formatted.overview,
+        numberOfSeasons: formatted.numberOfSeasons,
+        numberOfEpisodes: formatted.numberOfEpisodes,
+        existsInCatalog: Boolean(existing),
+        existingMediaId: existing?.id || null,
+        detection
+      };
+    };
+
+    const candidates: any[] = [];
+    const seen = new Set<string>();
+
+    const numericId = !isNaN(explicitId) ? explicitId : (/^\d+$/.test(rawQuery) ? parseInt(rawQuery, 10) : NaN);
+    if (!isNaN(numericId) && numericId > 0) {
+      const typesToTry: Array<'movie' | 'tv'> = explicitType ? [explicitType] : ['tv', 'movie'];
+      const fetched = await Promise.all(
+        typesToTry.map(async t => {
+          const data = await fetchTMDB(`/${t}/${numericId}`, { append_to_response: 'credits,videos' });
+          return data && data.id ? buildCandidate(data, t) : null;
+        })
+      );
+      for (const c of fetched) {
+        if (c && !seen.has(`${c.tmdbId}:${c.type}`)) {
+          seen.add(`${c.tmdbId}:${c.type}`);
+          candidates.push(c);
+        }
+      }
+    }
+
+    if (candidates.length === 0 && rawQuery) {
+      let multiRes = await fetchTMDB('/search/multi', { query: rawQuery, page: '1' });
+      if (!multiRes?.results?.length) {
+        multiRes = await fetchTMDB('/search/multi', { query: rawQuery, language: 'en-US', page: '1' });
+      }
+      const rawItems = (multiRes?.results || [])
+        .filter((r: any) => r && (r.media_type === 'movie' || r.media_type === 'tv'))
+        .slice(0, 8);
+
+      // Enrich top results with full TMDB metadata so originCountry/seasons/originalLanguage are reliable
+      const detailed = await Promise.all(
+        rawItems.map(async (r: any) => {
+          const mType: 'movie' | 'tv' = r.media_type === 'tv' ? 'tv' : 'movie';
+          const full = await fetchTMDB(`/${mType}/${r.id}`);
+          return buildCandidate(full && full.id ? full : r, mType);
+        })
+      );
+      for (const c of detailed) {
+        if (c && !seen.has(`${c.tmdbId}:${c.type}`)) {
+          seen.add(`${c.tmdbId}:${c.type}`);
+          candidates.push(c);
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      query: rawQuery || String(numericId),
+      candidates
+    });
+  });
+
+  // 2.0.1 Series Official TMDB vs Local Catalog Smart Comparison & Progressive Multi-Season Sync
+  app.get('/api/admin/series/:tmdbId/comparison', requireAdmin, async (req: Request, res: Response) => {
+    const tmdbId = parseInt(req.params.tmdbId, 10);
+    if (isNaN(tmdbId) || tmdbId <= 0) {
+      return res.status(400).json({ error: 'TMDB ID inválido.' });
+    }
+    const fetchOfficial = req.query.fetchTmdb !== 'false';
+    let officialSeasons: Array<{ seasonNumber: number; name?: string; episodeCount?: number }> | undefined;
+    if (fetchOfficial) {
+      const tmdbData = await fetchTMDB(`/tv/${tmdbId}`);
+      if (tmdbData && Array.isArray(tmdbData.seasons)) {
+        officialSeasons = tmdbData.seasons.map((s: any) => ({
+          seasonNumber: Number(s.season_number),
+          name: s.name || (Number(s.season_number) === 0 ? 'Especiais' : `Temporada ${s.season_number}`),
+          episodeCount: Number(s.episode_count || 0)
+        }));
+      }
+    }
+    const report = db.getSeriesComparisonStats(tmdbId, officialSeasons);
+    res.json({ success: true, report });
+  });
+
+  app.post('/api/admin/series/:tmdbId/sync-all', requireAdmin, async (req: Request, res: Response) => {
+    const tmdbId = parseInt(req.params.tmdbId, 10);
+    if (isNaN(tmdbId) || tmdbId <= 0) {
+      return res.status(400).json({ error: 'TMDB ID inválido.' });
+    }
+    const includeSpecials = req.body?.includeSpecials !== false;
+    const onlyMissing = req.body?.onlyMissing === true;
+
+    const tmdbData = await fetchTMDB(`/tv/${tmdbId}`, { append_to_response: 'credits,videos' });
+    if (!tmdbData) {
+      return res.status(404).json({ error: 'Série não encontrada no TMDB.' });
+    }
+
+    const formatted = formatTMDBMedia(tmdbData, 'tv');
+    const existing = db.getMediaByTmdbAndType(tmdbId, 'tv');
+    const candidateSeasons = (formatted.seasons || []).filter((s: any) =>
+      includeSpecials ? s.seasonNumber >= 0 : s.seasonNumber > 0
+    );
+
+    const seasonsToFetch = onlyMissing && existing
+      ? candidateSeasons.filter((s: any) => {
+          const localSeason = (existing.seasons || []).find(ls => Number(ls.seasonNumber) === Number(s.seasonNumber));
+          return !localSeason?.episodes || localSeason.episodes.length < Number(s.episodeCount || 1);
+        })
+      : candidateSeasons;
+
+    const jobId = `sync_${tmdbId}_${Date.now().toString(36)}`;
+    const job: SeriesSyncJob = {
+      jobId,
+      tmdbId,
+      title: formatted.title,
+      status: 'RUNNING',
+      totalSeasons: seasonsToFetch.length,
+      processedSeasons: 0,
+      totalEpisodesFound: 0,
+      currentSeasonNumber: null,
+      lastError: null,
+      startedAt: new Date().toISOString(),
+      completedAt: null
+    };
+    const state = { job, cancelled: false };
+    seriesSyncJobs.set(jobId, state);
+
+    // Ensure base series record exists in catalog before progressive hydration
+    db.upsertMediaItem({
+      ...formatted,
+      importSource: existing?.importSource || 'tmdb_series_sync'
+    });
+
+    // Run batched TMDB season fetch asynchronously (chunk size 3) saving progressively
+    setImmediate(async () => {
+      try {
+        const CHUNK = 3;
+        for (let i = 0; i < seasonsToFetch.length; i += CHUNK) {
+          if (state.cancelled) {
+            job.status = 'CANCELLED';
+            job.completedAt = new Date().toISOString();
+            return;
+          }
+          const batch = seasonsToFetch.slice(i, i + CHUNK);
+          const fetchedBatch = await Promise.all(
+            batch.map(async (sn: any) => {
+              job.currentSeasonNumber = Number(sn.seasonNumber);
+              try {
+                const tmdbSeason = await fetchTMDB(`/tv/${tmdbId}/season/${sn.seasonNumber}`, {}, AbortSignal.timeout(12000));
+                if (!tmdbSeason || !Array.isArray(tmdbSeason.episodes)) return null;
+                const episodes = tmdbSeason.episodes.map((ep: any) => ({
+                  id: `ep-${ep.id}`,
+                  tmdbId,
+                  seasonNumber: Number(sn.seasonNumber),
+                  episodeNumber: ep.episode_number,
+                  title: ep.name || `Episódio ${ep.episode_number}`,
+                  overview: ep.overview || 'Sinopse não disponível.',
+                  duration: ep.runtime || 45,
+                  stillPath: ep.still_path ? `https://image.tmdb.org/t/p/w500${ep.still_path}` : undefined,
+                  airDate: ep.air_date,
+                  voteAverage: ep.vote_average ? Number(ep.vote_average.toFixed(1)) : undefined
+                }));
+                return {
+                  id: `season-${sn.seasonNumber}`,
+                  seasonNumber: Number(sn.seasonNumber),
+                  name: tmdbSeason.name || sn.name || (Number(sn.seasonNumber) === 0 ? 'Especiais' : `Temporada ${sn.seasonNumber}`),
+                  overview: tmdbSeason.overview || sn.overview || '',
+                  posterPath: tmdbSeason.poster_path ? `https://image.tmdb.org/t/p/w500${tmdbSeason.poster_path}` : sn.posterPath,
+                  episodeCount: Math.max(Number(sn.episodeCount || 0), episodes.length),
+                  episodes
+                };
+              } catch (err: any) {
+                job.lastError = `T${sn.seasonNumber}: ${err?.message || 'timeout'}`;
+                return null;
+              }
+            })
+          );
+
+          const validBatch = fetchedBatch.filter(Boolean) as any[];
+          if (validBatch.length > 0) {
+            const current = db.getMediaByTmdbAndType(tmdbId, 'tv');
+            db.upsertMediaItem({
+              ...(current || formatted),
+              type: 'tv',
+              seasons: validBatch
+            });
+            job.totalEpisodesFound += validBatch.reduce((acc, s) => acc + (s.episodes?.length || 0), 0);
+          }
+          job.processedSeasons += batch.length;
+        }
+        invalidatePublicTrendingCache();
+        job.status = state.cancelled ? 'CANCELLED' : 'COMPLETED';
+        job.completedAt = new Date().toISOString();
+      } catch (err: any) {
+        job.status = 'ERROR';
+        job.lastError = err?.message || 'Erro na sincronização progressiva.';
+        job.completedAt = new Date().toISOString();
+      }
+    });
+
+    res.json({ success: true, job });
+  });
+
+  app.get('/api/admin/series/:tmdbId/sync-status/:jobId', requireAdmin, (req: Request, res: Response) => {
+    const entry = seriesSyncJobs.get(req.params.jobId);
+    if (!entry) return res.status(404).json({ error: 'Tarefa de sincronização não encontrada.' });
+    res.json({ success: true, job: entry.job });
+  });
+
+  app.post('/api/admin/series/:tmdbId/sync-cancel/:jobId', requireAdmin, (req: Request, res: Response) => {
+    const entry = seriesSyncJobs.get(req.params.jobId);
+    if (!entry) return res.status(404).json({ error: 'Tarefa de sincronização não encontrada.' });
+    entry.cancelled = true;
+    res.json({ success: true, job: entry.job });
   });
 
   // 2.1 Fetch TMDB Season Episodes for Manual Selection in Admin UI
@@ -2885,6 +4202,7 @@ async function startServer() {
 
     const episodes = tmdbSeason.episodes.map((ep: any) => ({
       id: `ep-${ep.id}`,
+      tmdbId,
       seasonNumber,
       episodeNumber: ep.episode_number,
       title: ep.name || `Episódio ${ep.episode_number}`,
@@ -2897,21 +4215,54 @@ async function startServer() {
 
     res.json({
       seasonNumber,
-      name: tmdbSeason.name || `Temporada ${seasonNumber}`,
+      name: tmdbSeason.name || (seasonNumber === 0 ? 'Especiais' : `Temporada ${seasonNumber}`),
       overview: tmdbSeason.overview || '',
       episodes
     });
   });
 
-  // 3. Confirm Import Media
+  // 3. Confirm Import Media (Manual Confirmation Only, Preserves Canonical Entity & Supports Categories + Optional Movie Source)
   app.post('/api/admin/tmdb/import', requireAdmin, async (req: Request, res: Response) => {
-    const { tmdbId, type, forceUpdate, selectedEpisodes } = req.body;
+    const { tmdbId, type, forceUpdate, selectedEpisodes, categories, importAllSeasons, includeSpecials, initialSource, importSource } = req.body;
     const mediaType: 'movie' | 'tv' = type === 'tv' ? 'tv' : 'movie';
-    const idNum = parseInt(tmdbId);
+    const idNum = parseInt(tmdbId, 10);
     const adminEmail = (req as any).user?.email || ADMIN_EMAIL;
 
     if (isNaN(idNum)) {
       return res.status(400).json({ error: 'TMDB ID inválido' });
+    }
+
+    // Validate optional initialSource BEFORE creating any record
+    let validatedInitialSource: {
+      originalUrl: string;
+      sourceKind: any;
+      suggestedFormat: any;
+      suggestedServerName: string;
+      diagnostics: any;
+      quality?: string;
+      audioLanguage?: string;
+      serverName?: string;
+    } | null = null;
+
+    if (mediaType === 'movie' && initialSource && typeof initialSource.url === 'string' && initialSource.url.trim()) {
+      const classified = classifySourceUrl(initialSource.url.trim());
+      if (!classified.valid) {
+        return res.status(400).json({ error: classified.error || 'Link de fonte inicial inválido.' });
+      }
+      const ssrf = await validatePublicHttpUrl(classified.normalizedUrl);
+      if (!ssrf.safe) {
+        return res.status(400).json({ error: ssrf.reason || 'Link de fonte bloqueado pela política de segurança SSRF.' });
+      }
+      validatedInitialSource = {
+        originalUrl: classified.originalUrl,
+        sourceKind: classified.sourceKind,
+        suggestedFormat: initialSource.format || classified.suggestedFormat,
+        suggestedServerName: initialSource.serverName || classified.suggestedServerName || 'Servidor Oficial',
+        diagnostics: classified.diagnostics,
+        quality: initialSource.quality || '1080p',
+        audioLanguage: initialSource.audioLanguage || 'Português',
+        serverName: initialSource.serverName
+      };
     }
 
     // Strict Duplication Check on Backend
@@ -2942,6 +4293,9 @@ async function startServer() {
 
     const formatted = formatTMDBMedia(tmdbData, mediaType);
 
+    // Explicit categories (if provided by Smart Importer UI); never silently misclassify
+    const explicitCategories = Array.isArray(categories) ? db.normalizeCategories(categories) : undefined;
+
     // If series and specific episodes were selected manually by admin
     if (mediaType === 'tv' && Array.isArray(selectedEpisodes) && selectedEpisodes.length > 0) {
       const allowedEps = new Set(selectedEpisodes.map((e: any) => `${e.seasonNumber}-${e.episodeNumber}`));
@@ -2956,6 +4310,7 @@ async function startServer() {
               .filter((ep: any) => allowedEps.has(`${sNum}-${ep.episode_number}`))
               .map((ep: any) => ({
                 id: `ep-${ep.id}`,
+                tmdbId: idNum,
                 seasonNumber: sNum,
                 episodeNumber: ep.episode_number,
                 title: ep.name || `Episódio ${ep.episode_number}`,
@@ -2969,9 +4324,9 @@ async function startServer() {
             populatedSeasons.push({
               id: `season-${sNum}`,
               seasonNumber: sNum,
-              name: tmdbSeason.name || `Temporada ${sNum}`,
+              name: tmdbSeason.name || (sNum === 0 ? 'Especiais' : `Temporada ${sNum}`),
               overview: tmdbSeason.overview || '',
-              episodeCount: filteredEpisodes.length,
+              episodeCount: Math.max(Number(tmdbSeason.episodes.length), filteredEpisodes.length),
               episodes: filteredEpisodes
             });
           }
@@ -2984,12 +4339,96 @@ async function startServer() {
         formatted.seasonsCount = populatedSeasons.length;
         formatted.episodesCount = populatedSeasons.reduce((acc, s) => acc + (s.episodes?.length || 0), 0);
       }
+    } else if (mediaType === 'tv' && importAllSeasons === true && Array.isArray(formatted.seasons) && formatted.seasons.length > 0) {
+      // Unlimited full-series season hydration without arbitrary 20-episode cap
+      const candidateSeasons = formatted.seasons.filter((s: any) =>
+        includeSpecials !== false ? s.seasonNumber >= 0 : s.seasonNumber > 0
+      );
+      const populatedSeasons: any[] = [];
+      const CHUNK = 4;
+      for (let i = 0; i < candidateSeasons.length; i += CHUNK) {
+        const batch = candidateSeasons.slice(i, i + CHUNK);
+        const batchResults = await Promise.all(
+          batch.map(async (sn: any) => {
+            try {
+              const tmdbSeason = await fetchTMDB(`/tv/${idNum}/season/${sn.seasonNumber}`, {}, AbortSignal.timeout(10000));
+              if (!tmdbSeason || !Array.isArray(tmdbSeason.episodes)) return sn;
+              const episodes = tmdbSeason.episodes.map((ep: any) => ({
+                id: `ep-${ep.id}`,
+                tmdbId: idNum,
+                seasonNumber: Number(sn.seasonNumber),
+                episodeNumber: ep.episode_number,
+                title: ep.name || `Episódio ${ep.episode_number}`,
+                overview: ep.overview || 'Sinopse não disponível.',
+                duration: ep.runtime || 45,
+                stillPath: ep.still_path ? `https://image.tmdb.org/t/p/w500${ep.still_path}` : undefined,
+                airDate: ep.air_date,
+                voteAverage: ep.vote_average ? Number(ep.vote_average.toFixed(1)) : undefined
+              }));
+              return {
+                id: `season-${sn.seasonNumber}`,
+                seasonNumber: Number(sn.seasonNumber),
+                name: tmdbSeason.name || sn.name || (Number(sn.seasonNumber) === 0 ? 'Especiais' : `Temporada ${sn.seasonNumber}`),
+                overview: tmdbSeason.overview || sn.overview || '',
+                posterPath: tmdbSeason.poster_path ? `https://image.tmdb.org/t/p/w500${tmdbSeason.poster_path}` : sn.posterPath,
+                episodeCount: Math.max(Number(sn.episodeCount || 0), episodes.length),
+                episodes
+              };
+            } catch {
+              return sn;
+            }
+          })
+        );
+        populatedSeasons.push(...batchResults);
+      }
+      if (populatedSeasons.length > 0) {
+        formatted.seasons = populatedSeasons.sort((a, b) => Number(a.seasonNumber) - Number(b.seasonNumber));
+        formatted.seasonsCount = formatted.seasons.length;
+        formatted.episodesCount = formatted.seasons.reduce(
+          (acc, s) => acc + Math.max(Number(s.episodeCount || 0), (s.episodes || []).length),
+          0
+        );
+      }
     }
 
-    const { item, isNew } = db.upsertMediaItem({
-      ...formatted,
-      importSource: 'tmdb_single'
-    });
+    const { item, isNew } = db.upsertMediaItem(
+      {
+        ...formatted,
+        ...(explicitCategories !== undefined ? { categories: explicitCategories } : {}),
+        importSource: importSource || (explicitCategories !== undefined ? 'smart_importer' : 'tmdb_single')
+      },
+      explicitCategories !== undefined ? { replaceCategories: Boolean(forceUpdate) } : undefined
+    );
+
+    let addedSource: any = null;
+    if (validatedInitialSource) {
+      const duplicateSrc = db.findDuplicateVideoSource({
+        contentId: idNum,
+        contentType: 'movie',
+        url: validatedInitialSource.originalUrl
+      });
+      if (!duplicateSrc) {
+        addedSource = await db.addVideoSource({
+          contentId: idNum,
+          contentType: 'movie',
+          sourceName: item.title,
+          serverName: validatedInitialSource.suggestedServerName,
+          url: validatedInitialSource.originalUrl,
+          originalUrl: validatedInitialSource.originalUrl,
+          sourceKind: validatedInitialSource.sourceKind,
+          format: validatedInitialSource.suggestedFormat,
+          quality: validatedInitialSource.quality,
+          audioLanguage: validatedInitialSource.audioLanguage,
+          isPrimary: true,
+          priority: 1,
+          enabled: true,
+          status: 'registered',
+          diagnostics: validatedInitialSource.diagnostics
+        });
+      }
+    }
+
+    invalidatePublicTrendingCache();
 
     db.addImportHistory({
       adminEmail,
@@ -3006,17 +4445,1470 @@ async function startServer() {
       success: true,
       isNew,
       item,
+      addedSource,
       message: isNew
         ? `${item.title} foi adicionado ao catálogo do RONYCINE.`
         : `${item.title} foi atualizado no catálogo do RONYCINE.`
     });
   });
 
-  // 4. Update Existing Catalog Media from TMDB
-  app.post('/api/admin/tmdb/update', requireAdmin, async (req: Request, res: Response) => {
-    const { tmdbId, type } = req.body;
+  // 3.1 Smart Seekee / External Link Analyzer & Importer ("Importação Inteligente")
+  const getLinkAnalyzerDeps = () => ({
+    fetchTMDB,
+    formatTMDBMedia,
+    detectContentCategory,
+    getExistingMedia: (tmdbId: number, type: 'movie' | 'tv') => db.getMediaByTmdbAndType(tmdbId, type)
+  });
+
+  app.post('/api/admin/link-importer/analyze', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const { url, urls, manualHintTitle, manualHtml, preferredTmdbId, preferredType } = req.body || {};
+      const inputList: string[] = Array.isArray(urls)
+        ? urls.map((u: any) => String(u || '').trim()).filter(Boolean)
+        : typeof url === 'string' && url.trim()
+          ? [url.trim()]
+          : [];
+
+      if (inputList.length === 0) {
+        return res.status(400).json({ error: 'Informe pelo menos um link externo válido para análise.' });
+      }
+      if (inputList.length > 2500) {
+        return res.status(400).json({ error: 'Limite de 2.500 links por operação em lote excedido.' });
+      }
+
+      const deps = getLinkAnalyzerDeps();
+      const results: any[] = [];
+      const CHUNK_SIZE = 5;
+
+      for (let i = 0; i < inputList.length; i += CHUNK_SIZE) {
+        const chunk = inputList.slice(i, i + CHUNK_SIZE);
+        const chunkResults = await Promise.all(
+          chunk.map(link =>
+            analyzeExternalLink(link, deps, {
+              manualHintTitle: inputList.length === 1 ? manualHintTitle : undefined,
+              manualHtml: inputList.length === 1 ? manualHtml : undefined,
+              preferredTmdbId: inputList.length === 1 && preferredTmdbId ? Number(preferredTmdbId) : undefined,
+              preferredType:
+                inputList.length === 1 && (preferredType === 'movie' || preferredType === 'tv')
+                  ? preferredType
+                  : undefined
+            })
+          )
+        );
+        results.push(...chunkResults);
+      }
+
+      res.json({
+        success: true,
+        count: results.length,
+        results
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Erro interno ao analisar links.' });
+    }
+  });
+
+  // Discover All Episodes of a Season from First Episode URL or Page Content
+  app.post('/api/admin/link-importer/discover-season', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const { tmdbId, seasonNumber, firstEpisodeUrl, expectedEpisodeCount, version, manualHtml, useMgebPrefix } = req.body || {};
+      const idNum = parseInt(String(tmdbId), 10);
+      const sNum = parseInt(String(seasonNumber ?? 1), 10);
+      if (isNaN(idNum) || idNum <= 0) {
+        return res.status(400).json({ error: 'TMDB ID inválido.' });
+      }
+
+      const deps = getLinkAnalyzerDeps();
+      const result = await discoverSeasonEpisodes(
+        idNum,
+        sNum,
+        String(firstEpisodeUrl || ''),
+        deps,
+        {
+          expectedEpisodeCount: expectedEpisodeCount ? Number(expectedEpisodeCount) : undefined,
+          version: version === 'legendado' ? 'legendado' : 'dublado',
+          manualHtml,
+          useMgebPrefix: typeof useMgebPrefix === 'boolean' ? useMgebPrefix : true
+        }
+      );
+
+      res.json({
+        success: true,
+        ...result
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Erro ao descobrir episódios da temporada.' });
+    }
+  });
+
+  // --- BATCH SEASON & EPISODE AUTO-DISCOVERY ENGINE (RESUMABLE + HONEST VERIFICATION) ---
+  const activeSeasonDiscoveryRunners = new Map<string, { cancelled: boolean; running: boolean }>();
+
+  async function runSeasonDiscoveryJobInBackground(
+    jobId: string,
+    options?: {
+      resume?: boolean;
+      targetTmdbId?: number;
+      targetSeasonNumber?: number;
+      onlyFailed?: boolean;
+      maxEpisodesLimit?: number;
+      manualHtml?: string;
+      skipExternalVerification?: boolean;
+    }
+  ) {
+    const existingRunner = activeSeasonDiscoveryRunners.get(jobId);
+    if (existingRunner?.running) return;
+
+    const job = db.getSeasonDiscoveryJob(jobId);
+    if (!job) return;
+
+    const runnerState = { cancelled: false, running: true };
+    activeSeasonDiscoveryRunners.set(jobId, runnerState);
+
+    try {
+      job.status = 'RUNNING';
+      recalculateJobStats(job);
+      db.saveSeasonDiscoveryJob(job);
+
+      const deps = getLinkAnalyzerDeps();
+
+      // Step A: Process movieItems inside the unified batch job (if not scoped to a specific season)
+      if (Array.isArray(job.movieItems) && job.movieItems.length > 0 && options?.targetSeasonNumber === undefined) {
+        const MOVIE_CONCURRENCY = 3;
+        const targets = job.movieItems.filter(m => {
+          if (options?.targetTmdbId && Number(m.tmdbId) !== Number(options.targetTmdbId)) return false;
+          if (options?.resume && m.verificationStatus === 'verified') return false;
+          if (options?.onlyFailed && m.verificationStatus === 'verified') return false;
+          return true;
+        });
+
+        for (let i = 0; i < targets.length; i += MOVIE_CONCURRENCY) {
+          if (runnerState.cancelled) break;
+          const batch = targets.slice(i, i + MOVIE_CONCURRENCY);
+          job.currentTask = `A verificar filmes (${Math.min(i + batch.length, targets.length)}/${targets.length})...`;
+          await Promise.all(batch.map(m => discoverMovieBatchItem(m)));
+          recalculateJobStats(job);
+          db.saveSeasonDiscoveryJob(job);
+        }
+      }
+
+      // Step B: Process TV series groups & seasons strictly isolated per season
+      for (const group of job.seriesGroups) {
+        if (runnerState.cancelled) break;
+        if (options?.targetTmdbId && Number(group.tmdbId) !== Number(options.targetTmdbId)) {
+          continue;
+        }
+
+        const existingMedia = db.getMediaByTmdbAndType(group.tmdbId, 'tv');
+        group.existsInCatalog = Boolean(existingMedia);
+
+        for (const season of group.seasons) {
+          if (runnerState.cancelled) {
+            if (season.status === 'queued' || season.status === 'discovering') {
+              season.status = 'paused';
+            }
+            break;
+          }
+
+          if (
+            options?.targetSeasonNumber !== undefined &&
+            Number(season.seasonNumber) !== Number(options.targetSeasonNumber)
+          ) {
+            continue;
+          }
+
+          if (
+            options?.resume &&
+            options.targetSeasonNumber === undefined &&
+            (season.status === 'completed' || season.status === 'partial' || season.status === 'unconfirmed')
+          ) {
+            continue;
+          }
+
+          job.currentTask = `A descobrir ${group.title} · Temporada ${season.seasonNumber}...`;
+          recalculateJobStats(job);
+          db.saveSeasonDiscoveryJob(job);
+
+          await discoverSeasonEpisodesBatchItem(season, group.tmdbId, deps, {
+            maxEpisodesLimit: options?.maxEpisodesLimit || job.maxEpisodesLimit || 250,
+            existingMedia,
+            onlyFailed: options?.onlyFailed,
+            manualHtml: options?.manualHtml,
+            skipExternalVerification: options?.skipExternalVerification,
+            isAborted: () => runnerState.cancelled,
+            onProgress: () => {
+              recalculateJobStats(job);
+              db.saveSeasonDiscoveryJob(job);
+            }
+          });
+
+          recalculateJobStats(job);
+          db.saveSeasonDiscoveryJob(job);
+        }
+      }
+
+      if (runnerState.cancelled) {
+        job.status = 'CANCELLED';
+        job.currentTask = 'Descoberta cancelada pelo administrador (progresso preservado para retoma).';
+      } else {
+        const hasAnyUsableSeason = job.seriesGroups.some(g =>
+          g.seasons.some(s => s.status !== 'error' || s.discoveredCount > 0)
+        );
+        const hasAnyMovies = Array.isArray(job.movieItems) && job.movieItems.length > 0;
+        job.status = job.totalSeasons > 0 && !hasAnyUsableSeason && !hasAnyMovies ? 'ERROR' : 'COMPLETED';
+        job.currentTask = `Concluído: ${job.totalMovies || 0} filme(s) · ${job.totalEpisodesDiscovered} episódios preparados (${job.verifiedEpisodes} confirmados, ${job.unconfirmedEpisodes} não verificados/bloqueados).`;
+      }
+
+      recalculateJobStats(job);
+      db.saveSeasonDiscoveryJob(job);
+    } catch (err: any) {
+      const current = db.getSeasonDiscoveryJob(jobId);
+      if (current) {
+        current.status = 'ERROR';
+        current.errors = [...(current.errors || []), err?.message || 'Erro interno no job de descoberta.'];
+        current.currentTask = err?.message || 'Erro durante descoberta automática.';
+        recalculateJobStats(current);
+        db.saveSeasonDiscoveryJob(current);
+      }
+    } finally {
+      runnerState.running = false;
+      activeSeasonDiscoveryRunners.delete(jobId);
+    }
+  }
+
+  app.post('/api/admin/link-importer/seasons/discover-batch', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const { urls, maxEpisodesLimit, overrideTmdbId, verifyHttp } = req.body || {};
+      const inputEntries: Array<
+        string | { url: string; version?: 'dublado' | 'legendado'; useMgeb?: boolean; quality?: string; serverName?: string }
+      > = Array.isArray(urls)
+        ? urls
+            .map((u: any) =>
+              typeof u === 'object' && u !== null
+                ? {
+                    url: String(u.url || '').trim(),
+                    version: u.version === 'legendado' ? ('legendado' as const) : ('dublado' as const),
+                    useMgeb: u.useMgeb !== false,
+                    quality: String(u.quality || '1080p'),
+                    serverName: typeof u.serverName === 'string' ? u.serverName : undefined
+                  }
+                : String(u || '').trim()
+            )
+            .filter((item: any) => (typeof item === 'string' ? Boolean(item) : Boolean(item.url)))
+        : typeof urls === 'string'
+          ? urls.split(/\r?\n/).map(s => s.trim()).filter(Boolean)
+          : [];
+
+      if (inputEntries.length === 0) {
+        return res.status(400).json({ error: 'Informe pelo menos 1 link de filme ou temporada.' });
+      }
+
+      const job = await buildBatchSeasonDiscoveryJob(inputEntries, getLinkAnalyzerDeps(), {
+        maxEpisodesLimit: maxEpisodesLimit ? Number(maxEpisodesLimit) : 250,
+        overrideTmdbId: overrideTmdbId ? Number(overrideTmdbId) : undefined
+      });
+
+      db.saveSeasonDiscoveryJob(job);
+
+      if ((job.seriesGroups.length > 0 || (job.movieItems?.length || 0) > 0) && job.status === 'RUNNING') {
+        void runSeasonDiscoveryJobInBackground(job.jobId, {
+          skipExternalVerification: verifyHttp === false
+        });
+      }
+
+      res.json({ success: true, job });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Erro ao iniciar descoberta automática.' });
+    }
+  });
+
+  app.post('/api/admin/link-importer/seasons/generate-deterministic', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const { tmdbId, seasons, verifyHttp, maxEpisodesLimit } = req.body || {};
+      const cleanTmdbId = parseInt(String(tmdbId || '0'), 10);
+      if (isNaN(cleanTmdbId) || cleanTmdbId <= 0) {
+        return res.status(400).json({ error: 'TMDB ID inválido para geração de série.' });
+      }
+      if (!Array.isArray(seasons) || seasons.length === 0) {
+        return res.status(400).json({ error: 'Informe pelo menos 1 temporada com o link do Episódio 1.' });
+      }
+
+      const job = await buildDeterministicSeriesJob(
+        {
+          tmdbId: cleanTmdbId,
+          seasons: seasons.map((s: any) => ({
+            seasonNumber: Number(s.seasonNumber ?? 1),
+            mainUrl: String(s.mainUrl || '').trim(),
+            version: s.version === 'legendado' ? 'legendado' : 'dublado',
+            useMgeb: s.useMgeb !== false,
+            quality: String(s.quality || '1080p'),
+            serverName: typeof s.serverName === 'string' ? s.serverName : undefined
+          })),
+          verifyHttp: Boolean(verifyHttp),
+          maxEpisodesLimit: maxEpisodesLimit ? Number(maxEpisodesLimit) : 250
+        },
+        getLinkAnalyzerDeps()
+      );
+
+      db.saveSeasonDiscoveryJob(job);
+
+      if (verifyHttp && job.seriesGroups.length > 0) {
+        void runSeasonDiscoveryJobInBackground(job.jobId, {
+          skipExternalVerification: false,
+          onlyFailed: true
+        });
+      }
+
+      res.json({ success: true, job });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Erro ao gerar episódios da série.' });
+    }
+  });
+
+  app.post('/api/admin/link-importer/seasons/jobs/:jobId/verify-http', requireAdmin, (req: Request, res: Response) => {
+    const job = db.getSeasonDiscoveryJob(req.params.jobId);
+    if (!job) {
+      return res.status(404).json({ error: 'Operação de descoberta não encontrada.' });
+    }
+    const { seasonNumber, tmdbId } = req.body || {};
+    job.status = 'RUNNING';
+    job.currentTask =
+      seasonNumber !== undefined
+        ? `A verificar links externos da Temporada ${seasonNumber}...`
+        : 'A verificar disponibilidade externa dos links gerados...';
+    recalculateJobStats(job);
+    db.saveSeasonDiscoveryJob(job);
+    void runSeasonDiscoveryJobInBackground(job.jobId, {
+      targetTmdbId: tmdbId ? Number(tmdbId) : undefined,
+      targetSeasonNumber: seasonNumber !== undefined ? Number(seasonNumber) : undefined,
+      skipExternalVerification: false,
+      onlyFailed: true
+    });
+    res.json({ success: true, job });
+  });
+
+  app.get('/api/admin/link-importer/seasons/jobs', requireAdmin, (_req: Request, res: Response) => {
+    res.json({
+      success: true,
+      jobs: db.getSeasonDiscoveryJobs()
+    });
+  });
+
+  app.get('/api/admin/link-importer/seasons/jobs/:jobId', requireAdmin, (req: Request, res: Response) => {
+    const job = db.getSeasonDiscoveryJob(req.params.jobId);
+    if (!job) {
+      return res.status(404).json({ error: 'Operação de descoberta não encontrada.' });
+    }
+    res.json({ success: true, job });
+  });
+
+  app.post('/api/admin/link-importer/seasons/jobs/:jobId/test-mgeb', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const { url, tmdbId, seasonNumber, episodeNumber, movieId, sourceId } = req.body || {};
+      const targetUrl = String(url || '').trim();
+      if (!targetUrl) {
+        return res.status(400).json({ error: 'Informe o link a testar com MGEB.' });
+      }
+
+      const compat = await verifyMgebCompatibility(targetUrl);
+      const job = db.getSeasonDiscoveryJob(req.params.jobId);
+
+      if (job) {
+        if (movieId && Array.isArray(job.movieItems)) {
+          const m = job.movieItems.find(item => item.movieId === movieId || Number(item.tmdbId) === Number(tmdbId));
+          if (m) {
+            if (sourceId) {
+              const s = m.sources.find(src => src.id === sourceId);
+              if (s) {
+                s.compatibilityStatus = compat.compatibilityStatus;
+                s.compatibilityMessage = compat.compatibilityMessage;
+              }
+            } else {
+              m.playbackCompatibility = compat.compatibilityStatus;
+              m.compatibilityMessage = compat.compatibilityMessage;
+              const resolved = resolveDetailedDiscoveryState({
+                verificationStatus: m.verificationStatus,
+                playbackCompatibility: m.playbackCompatibility,
+                protectionDetected: m.protectionDetected,
+                httpStatus: m.httpStatus,
+                manualConfirmed: m.manualConfirmed,
+                hasProcessedMgeb: Boolean(m.processedUrl),
+                hasTmdbMetadata: true,
+                diagnosticMessage: compat.compatibilityMessage
+              });
+              m.detailedState = resolved.detailedState;
+              m.stateReason = resolved.stateReason;
+            }
+          }
+        } else if (tmdbId !== undefined && seasonNumber !== undefined && episodeNumber !== undefined) {
+          const grp = job.seriesGroups.find(g => Number(g.tmdbId) === Number(tmdbId));
+          const s = grp?.seasons.find(item => Number(item.seasonNumber) === Number(seasonNumber));
+          const ep = s?.episodes.find(e => Number(e.episodeNumber) === Number(episodeNumber));
+          if (s && ep) {
+            if (sourceId && Array.isArray(ep.sources)) {
+              const src = ep.sources.find(item => item.id === sourceId);
+              if (src) {
+                src.compatibilityStatus = compat.compatibilityStatus;
+                src.compatibilityMessage = compat.compatibilityMessage;
+              }
+            }
+            ep.playbackCompatibility = compat.compatibilityStatus;
+            ep.compatibilityMessage = compat.compatibilityMessage;
+            const resolved = resolveDetailedDiscoveryState({
+              verificationStatus: ep.verificationStatus,
+              playbackCompatibility: ep.playbackCompatibility,
+              protectionDetected: ep.protectionDetected,
+              httpStatus: ep.httpStatus,
+              manualConfirmed: ep.manualConfirmed,
+              hasProcessedMgeb: Boolean(ep.processedUrl),
+              hasTmdbMetadata: true,
+              diagnosticMessage: compat.compatibilityMessage
+            });
+            ep.detailedState = resolved.detailedState;
+            ep.stateReason = resolved.stateReason;
+            finalizeSeasonCounts(s);
+          }
+        }
+        recalculateJobStats(job);
+        db.saveSeasonDiscoveryJob(job);
+      }
+
+      res.json({ success: true, result: compat, job });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Erro ao testar compatibilidade MGEB.' });
+    }
+  });
+
+  app.post('/api/admin/link-importer/seasons/jobs/:jobId/cancel', requireAdmin, (req: Request, res: Response) => {
+    const job = db.getSeasonDiscoveryJob(req.params.jobId);
+    if (!job) {
+      return res.status(404).json({ error: 'Operação de descoberta não encontrada.' });
+    }
+    const runner = activeSeasonDiscoveryRunners.get(job.jobId);
+    if (runner) {
+      runner.cancelled = true;
+    }
+    job.status = 'CANCELLED';
+    job.currentTask = 'Cancelado pelo administrador (progresso preservado).';
+    for (const g of job.seriesGroups) {
+      for (const s of g.seasons) {
+        if (s.status === 'queued' || s.status === 'discovering') {
+          s.status = 'paused';
+        }
+      }
+    }
+    recalculateJobStats(job);
+    db.saveSeasonDiscoveryJob(job);
+    res.json({ success: true, job });
+  });
+
+  app.post('/api/admin/link-importer/seasons/jobs/:jobId/resume', requireAdmin, (req: Request, res: Response) => {
+    const job = db.getSeasonDiscoveryJob(req.params.jobId);
+    if (!job) {
+      return res.status(404).json({ error: 'Operação de descoberta não encontrada.' });
+    }
+    for (const g of job.seriesGroups) {
+      for (const s of g.seasons) {
+        if (s.status === 'paused') {
+          s.status = 'queued';
+        }
+      }
+    }
+    job.status = 'RUNNING';
+    job.currentTask = 'A retomar descoberta dos itens pendentes...';
+    recalculateJobStats(job);
+    db.saveSeasonDiscoveryJob(job);
+    void runSeasonDiscoveryJobInBackground(job.jobId, { resume: true });
+    res.json({ success: true, job });
+  });
+
+  app.post('/api/admin/link-importer/seasons/jobs/:jobId/retry', requireAdmin, (req: Request, res: Response) => {
+    const job = db.getSeasonDiscoveryJob(req.params.jobId);
+    if (!job) {
+      return res.status(404).json({ error: 'Operação de descoberta não encontrada.' });
+    }
+    const { seasonNumber, tmdbId, onlyFailed, maxEpisodesLimit, manualHtml, newMainUrl } = req.body || {};
+
+    if (seasonNumber !== undefined) {
+      const targetS = Number(seasonNumber);
+      for (const g of job.seriesGroups) {
+        if (tmdbId && Number(g.tmdbId) !== Number(tmdbId)) continue;
+        const s = g.seasons.find(item => Number(item.seasonNumber) === targetS);
+        if (s) {
+          if (newMainUrl && typeof newMainUrl === 'string' && newMainUrl.trim()) {
+            const stripped = stripMgebPrefix(newMainUrl.trim());
+            s.mainUrl = (stripped.innerUrl || newMainUrl).trim();
+            s.processedMainUrl = buildMgebUrl(s.mainUrl, true).finalUrl || s.mainUrl;
+            const pat = detectSeasonUrlPattern(s.mainUrl);
+            s.adapterType = pat.adapterType;
+            s.requiresManualReview = pat.requiresManualReview;
+            s.patternNotice = pat.patternNotice;
+            s.providerId = pat.providerId || s.providerId;
+          }
+          if (!onlyFailed) {
+            s.status = 'queued';
+            s.errorMessage = null;
+          }
+        }
+      }
+    }
+
+    job.status = 'RUNNING';
+    job.currentTask =
+      seasonNumber !== undefined
+        ? `A repetir descoberta da Temporada ${seasonNumber}...`
+        : 'A repetir itens pendentes/falhados...';
+    recalculateJobStats(job);
+    db.saveSeasonDiscoveryJob(job);
+
+    void runSeasonDiscoveryJobInBackground(job.jobId, {
+      targetTmdbId: tmdbId ? Number(tmdbId) : undefined,
+      targetSeasonNumber: seasonNumber !== undefined ? Number(seasonNumber) : undefined,
+      onlyFailed: Boolean(onlyFailed),
+      maxEpisodesLimit: maxEpisodesLimit ? Number(maxEpisodesLimit) : undefined,
+      manualHtml: typeof manualHtml === 'string' ? manualHtml : undefined
+    });
+
+    res.json({ success: true, job });
+  });
+
+  app.post('/api/admin/link-importer/seasons/jobs/:jobId/commit', requireAdmin, async (req: Request, res: Response) => {
+    const adminEmail = (req as any).user?.email || ADMIN_EMAIL;
+    const job = db.getSeasonDiscoveryJob(req.params.jobId);
+    const bodyGroups = Array.isArray(req.body?.seriesGroups)
+      ? (req.body.seriesGroups as BatchSeriesDiscoveryGroup[])
+      : undefined;
+    const bodyMovies = Array.isArray(req.body?.movieItems)
+      ? (req.body.movieItems as BatchDiscoveredMovieItem[])
+      : undefined;
+    const duplicateMode: 'merge_missing' | 'update_metadata' | 'skip' =
+      req.body?.duplicateMode === 'skip' || req.body?.duplicateMode === 'update_metadata'
+        ? req.body.duplicateMode
+        : 'merge_missing';
+
+    const seriesGroups = bodyGroups ?? job?.seriesGroups ?? [];
+    const movieItems = bodyMovies ?? job?.movieItems ?? [];
+
+    if (seriesGroups.length === 0 && movieItems.length === 0) {
+      return res.status(404).json({ error: 'Nenhum filme ou série disponível para importação.' });
+    }
+
+    let importedSeriesCount = 0;
+    let importedMoviesCount = 0;
+    let seasonsCommitted = 0;
+    let episodesCommitted = 0;
+    let duplicatesSkipped = 0;
+    let sourcesAssociated = 0;
+    const nowIso = new Date().toISOString();
+    const results: Array<{
+      tmdbId: number;
+      type: 'movie' | 'tv';
+      title: string;
+      status: 'IMPORTED' | 'UPDATED' | 'SKIPPED' | 'ERROR';
+      seasonsCount: number;
+      episodesCount: number;
+      sourcesCount: number;
+      message: string;
+    }> = [];
+
+    // 1. Commit Approved Movies (with multiple sources & MGEB prefix preservation)
+    for (const movie of movieItems) {
+      if (!movie.approved) {
+        results.push({
+          tmdbId: movie.tmdbId,
+          type: 'movie',
+          title: movie.title,
+          status: 'SKIPPED',
+          seasonsCount: 0,
+          episodesCount: 0,
+          sourcesCount: 0,
+          message: 'Filme desmarcado pelo administrador.'
+        });
+        continue;
+      }
+
+      const existing = db.getMediaByTmdbAndType(movie.tmdbId, 'movie');
+      if (existing && duplicateMode === 'skip') {
+        duplicatesSkipped++;
+        results.push({
+          tmdbId: movie.tmdbId,
+          type: 'movie',
+          title: existing.title,
+          status: 'SKIPPED',
+          seasonsCount: 0,
+          episodesCount: 0,
+          sourcesCount: 0,
+          message: `${existing.title} já existe no catálogo (modo ignorar duplicados).`
+        });
+        continue;
+      }
+
+      const tmdbData = await fetchTMDB(`/movie/${movie.tmdbId}`, { append_to_response: 'credits,videos' });
+      const formattedBase = tmdbData
+        ? formatTMDBMedia(tmdbData, 'movie')
+        : {
+            tmdbId: movie.tmdbId,
+            type: 'movie' as const,
+            title: movie.title,
+            originalTitle: movie.originalTitle,
+            overview: movie.overview || '',
+            posterPath: movie.posterPath,
+            releaseYear: movie.releaseYear,
+            categories: movie.categories
+          };
+
+      const { item, isNew } = db.upsertMediaItem(
+        {
+          ...formattedBase,
+          tmdbId: movie.tmdbId,
+          type: 'movie',
+          title: movie.title || formattedBase.title,
+          categories: movie.categories ?? formattedBase.categories,
+          published: true,
+          importSource: 'smart_link_season_discovery'
+        },
+        movie.categories !== undefined ? { replaceCategories: false } : undefined
+      );
+      item.published = true;
+      db.saveMedia(item);
+
+      const candidateSources: BatchEpisodeSourceDraft[] =
+        Array.isArray(movie.sources) && movie.sources.length > 0
+          ? movie.sources
+          : [
+              {
+                id: `msrc-${movie.tmdbId}`,
+                originalUrl: movie.originalUrl,
+                processedUrl: movie.processedUrl || buildMgebUrl(movie.originalUrl, movie.useMgeb).finalUrl,
+                processedUrlDisplay:
+                  movie.processedUrlDisplay || buildMgebUrl(movie.originalUrl, movie.useMgeb).displayFinalUrl,
+                version: movie.version || 'dublado',
+                serverName: movie.version === 'legendado' ? 'Servidor Legendado MGEB' : 'Servidor Dublado MGEB',
+                quality: '1080p',
+                useMgeb: movie.useMgeb !== false,
+                compatibilityStatus: movie.playbackCompatibility || 'untested',
+                compatibilityMessage: movie.compatibilityMessage,
+                manualConfirmed: movie.manualConfirmed,
+                createdAt: movie.createdAt || nowIso
+              }
+            ];
+
+      let movieSourcesCount = 0;
+      for (const src of candidateSources) {
+        const rawSrcUrl = (src.originalUrl || '').trim();
+        if (!rawSrcUrl) continue;
+        const built = buildMgebUrl(rawSrcUrl, src.useMgeb !== false);
+        const canonicalUrl = src.processedUrl?.trim() || (built.valid ? built.finalUrl : rawSrcUrl);
+        const classified = classifySourceUrl(canonicalUrl);
+        if (!classified.valid) continue;
+        const ssrf = await validatePublicHttpUrl(classified.normalizedUrl);
+        if (!ssrf.safe) continue;
+
+        try {
+          const slots = await db.getVersionSlotsForContent({
+            contentId: Number(item.tmdbId || movie.tmdbId),
+            contentType: 'movie'
+          });
+          const ver = src.version === 'legendado' ? 'legendado' : 'dublado';
+          const existingList = ver === 'legendado' ? slots.legendado.sources : slots.dublado.sources;
+          const dupSrc = existingList.find(
+            s => (s.originalUrl || s.url || '').trim() === (classified.originalUrl || canonicalUrl).trim()
+          );
+          if (dupSrc) {
+            duplicatesSkipped++;
+            continue;
+          }
+
+          await db.upsertVersionSourceSlot({
+            contentId: Number(item.tmdbId || movie.tmdbId),
+            contentType: 'movie',
+            version: ver,
+            url: canonicalUrl,
+            serverName: src.serverName || (ver === 'legendado' ? 'Servidor Legendado MGEB' : 'Servidor Dublado MGEB'),
+            quality: src.quality || '1080p',
+            format: classified.suggestedFormat,
+            enabled: true,
+            replaceExisting: false,
+            status: src.compatibilityStatus === 'compatible' ? 'online' : 'registered',
+            diagnostics: classified.diagnostics,
+            adminEmail
+          });
+          sourcesAssociated++;
+          movieSourcesCount++;
+        } catch (srcErr) {
+          console.error(`[MOVIE_BATCH_COMMIT] Source error TMDB ${movie.tmdbId}:`, srcErr);
+        }
+      }
+
+      importedMoviesCount++;
+      const mainDomain = (() => {
+        try {
+          return new URL(movie.originalUrl).hostname;
+        } catch {
+          return '';
+        }
+      })();
+
+      db.addLinkImportHistory({
+        url: movie.originalUrl,
+        domain: mainDomain,
+        status: isNew ? 'SUCCESS' : 'UPDATED',
+        tmdbId: Number(item.tmdbId || movie.tmdbId),
+        type: 'movie',
+        title: item.title,
+        releaseYear: item.releaseYear,
+        sourceLinksDetected: movieSourcesCount,
+        confidence: movie.confidence,
+        details: `Importação Inteligente PRO (Filme): ${movieSourcesCount} fonte(s) associada(s) com prefixo MGEB.`,
+        adminEmail
+      });
+
+      db.addImportHistory({
+        adminEmail,
+        title: item.title,
+        tmdbId: Number(item.tmdbId || movie.tmdbId),
+        type: 'movie',
+        status: 'SUCCESS',
+        details: `Importação Inteligente PRO (Filme): ${movieSourcesCount} fonte(s)`
+      });
+
+      db.addAuditLog(
+        adminEmail,
+        'SMART_MOVIE_BATCH_IMPORT',
+        'SUCCESS',
+        `${isNew ? 'Importado' : 'Atualizado'} filme ${item.title} (TMDB ${movie.tmdbId}): ${movieSourcesCount} fonte(s).`
+      );
+
+      results.push({
+        tmdbId: movie.tmdbId,
+        type: 'movie',
+        title: item.title,
+        status: isNew ? 'IMPORTED' : 'UPDATED',
+        seasonsCount: 0,
+        episodesCount: 0,
+        sourcesCount: movieSourcesCount,
+        message: `${item.title}: gravado com ${movieSourcesCount} fonte(s).`
+      });
+    }
+
+    // 2. Commit Approved Series Groups (strictly isolated per season + multi-source support)
+    for (const group of seriesGroups) {
+      const approvedSeasons = (group.seasons || []).filter(
+        s => s.approved && Array.isArray(s.episodes) && s.episodes.some(e => e.approved && e.verificationStatus !== 'not_found')
+      );
+      if (approvedSeasons.length === 0) {
+        results.push({
+          tmdbId: group.tmdbId,
+          type: 'tv',
+          title: group.title,
+          status: 'SKIPPED',
+          seasonsCount: 0,
+          episodesCount: 0,
+          sourcesCount: 0,
+          message: 'Nenhuma temporada/episódio aprovado para importação.'
+        });
+        continue;
+      }
+
+      const existing = db.getMediaByTmdbAndType(group.tmdbId, 'tv');
+      if (existing && duplicateMode === 'skip') {
+        duplicatesSkipped++;
+        results.push({
+          tmdbId: group.tmdbId,
+          type: 'tv',
+          title: existing.title,
+          status: 'SKIPPED',
+          seasonsCount: 0,
+          episodesCount: 0,
+          sourcesCount: 0,
+          message: `${existing.title} já existe no catálogo (modo ignorar duplicados).`
+        });
+        continue;
+      }
+
+      const tmdbData = await fetchTMDB(`/tv/${group.tmdbId}`, { append_to_response: 'credits,videos' });
+      const formattedBase = tmdbData
+        ? formatTMDBMedia(tmdbData, 'tv')
+        : {
+            tmdbId: group.tmdbId,
+            type: 'tv' as const,
+            title: group.title,
+            originalTitle: group.originalTitle,
+            overview: group.overview || '',
+            posterPath: group.posterPath,
+            releaseYear: group.releaseYear,
+            categories: group.categories
+          };
+
+      let seriesEpisodesCommitted = 0;
+      let seriesSourcesCount = 0;
+
+      const seasonsToUpsert = approvedSeasons.map(season => {
+        const existingSeason = (existing?.seasons || []).find(
+          es => Number(es.seasonNumber) === Number(season.seasonNumber)
+        );
+        const approvedEps = season.episodes.filter(
+          ep => ep.approved && ep.verificationStatus !== 'not_found'
+        );
+
+        const episodesPayload = approvedEps.map(ep => {
+          const epOrigUrl = ep.originalUrl || ep.episodePageUrl;
+          const epProcUrl = ep.processedUrl || buildMgebUrl(epOrigUrl, true).finalUrl;
+          const existingEp = (existingSeason?.episodes || []).find(
+            ee => Number(ee.episodeNumber) === Number(ep.episodeNumber)
+          );
+          if (existingEp) {
+            const samePageUrl =
+              (existingEp.extraMetadata?.episodePageUrl || existingEp.link) === epOrigUrl;
+            if (samePageUrl && duplicateMode === 'merge_missing') {
+              duplicatesSkipped++;
+            }
+          }
+          seriesEpisodesCommitted++;
+          episodesCommitted++;
+
+          // Rule 12: Keep episodePageUrl / originalPageUrl / processedMgebUrl cleanly stored without lying about playable status!
+          return {
+            id: existingEp?.id || ep.episodeId || `ep-${group.tmdbId}-s${season.seasonNumber}-e${ep.episodeNumber}`,
+            tmdbId: group.tmdbId,
+            seasonNumber: Number(season.seasonNumber),
+            episodeNumber: Number(ep.episodeNumber),
+            title: ep.title || existingEp?.title || `Episódio ${ep.episodeNumber}`,
+            overview: ep.overview || existingEp?.overview || '',
+            duration: ep.duration || existingEp?.duration,
+            stillPath: ep.stillPath || existingEp?.stillPath,
+            airDate: ep.airDate || existingEp?.airDate,
+            voteAverage: ep.voteAverage ?? existingEp?.voteAverage,
+            link: existingEp?.link || epOrigUrl,
+            extraMetadata: {
+              ...(existingEp?.extraMetadata || {}),
+              originalPageUrl: ep.originalPageUrl || season.mainUrl,
+              episodePageUrl: epOrigUrl,
+              processedMgebUrl: epProcUrl,
+              audioVersion: ep.playbackVersion || 'dublado',
+              detailedState: ep.detailedState,
+              playbackCompatibility: ep.playbackCompatibility,
+              providerId: season.providerId,
+              adapterType: season.adapterType,
+              discoveryStatus: ep.verificationStatus,
+              discoveredAt: ep.createdAt || nowIso
+            }
+          };
+        });
+
+        seasonsCommitted++;
+        return {
+          id: existingSeason?.id || `season-${season.seasonNumber}`,
+          seasonNumber: Number(season.seasonNumber),
+          name:
+            season.name ||
+            existingSeason?.name ||
+            (Number(season.seasonNumber) === 0 ? 'Especiais' : `Temporada ${season.seasonNumber}`),
+          overview: season.overview || existingSeason?.overview || '',
+          posterPath: season.posterPath || existingSeason?.posterPath,
+          episodeCount: Math.max(
+            Number(season.tmdbExpectedCount || 0),
+            episodesPayload.length,
+            existingSeason?.episodes?.length || 0
+          ),
+          episodes: episodesPayload
+        };
+      });
+
+      const { item, isNew } = db.upsertMediaItem(
+        {
+          ...formattedBase,
+          tmdbId: group.tmdbId,
+          type: 'tv',
+          title: group.title || formattedBase.title,
+          categories: group.categories ?? formattedBase.categories,
+          seasons: seasonsToUpsert,
+          published: true,
+          importSource: 'smart_link_season_discovery'
+        },
+        group.categories !== undefined ? { replaceCategories: false } : undefined
+      );
+
+      const totalItemEpisodes = (item.seasons || []).reduce(
+        (acc, s) => acc + (s.episodes?.length || 0),
+        0
+      );
+      item.seasonsCount = item.seasons?.length || 0;
+      item.episodesCount = totalItemEpisodes;
+      item.published = true;
+      db.saveMedia(item);
+
+      // Associate playback sources per episode: supports multiple explicit sources[] AND playbackSourceUrl without overwriting existing working sources
+      for (const season of approvedSeasons) {
+        const approvedEps = season.episodes.filter(
+          ep => ep.approved && ep.verificationStatus !== 'not_found'
+        );
+        for (const ep of approvedEps) {
+          const epSources: BatchEpisodeSourceDraft[] = Array.isArray(ep.sources) ? [...ep.sources] : [];
+          const legacyPlayUrl = String(ep.playbackSourceUrl || '').trim();
+          if (legacyPlayUrl && !epSources.some(s => s.originalUrl === stripMgebPrefix(legacyPlayUrl).innerUrl)) {
+            const builtLegacy = buildMgebUrl(legacyPlayUrl, Boolean(ep.useMgebForPlayback));
+            epSources.push({
+              id: `legacy-${ep.episodeNumber}`,
+              originalUrl: builtLegacy.innerUrl || legacyPlayUrl,
+              processedUrl: builtLegacy.finalUrl || legacyPlayUrl,
+              processedUrlDisplay: builtLegacy.displayFinalUrl || legacyPlayUrl,
+              version: ep.playbackVersion === 'legendado' ? 'legendado' : 'dublado',
+              serverName: ep.playbackVersion === 'legendado' ? 'Servidor Legendado' : 'Servidor Dublado',
+              quality: '1080p',
+              useMgeb: Boolean(ep.useMgebForPlayback),
+              compatibilityStatus: ep.playbackCompatibility || 'untested',
+              createdAt: nowIso
+            });
+          }
+          const fallbackEpOrig = String(ep.originalUrl || ep.episodePageUrl || '').trim();
+          if (epSources.length === 0 && fallbackEpOrig) {
+            const useMgebFlag = ep.useMgebForPlayback !== false;
+            const builtEp = buildMgebUrl(fallbackEpOrig, useMgebFlag);
+            const epVer: 'dublado' | 'legendado' =
+              ep.playbackVersion === 'legendado' ? 'legendado' : 'dublado';
+            if (builtEp.valid) {
+              epSources.push({
+                id: `mgeb-${season.seasonNumber}-${ep.episodeNumber}`,
+                originalUrl: builtEp.innerUrl || fallbackEpOrig,
+                processedUrl: ep.processedUrl?.trim() || builtEp.finalUrl,
+                processedUrlDisplay: ep.processedUrlDisplay?.trim() || builtEp.displayFinalUrl,
+                version: epVer,
+                serverName: epVer === 'legendado' ? 'Servidor Legendado MGEB' : 'Servidor Dublado MGEB',
+                quality: '1080p',
+                useMgeb: useMgebFlag,
+                compatibilityStatus: ep.playbackCompatibility || 'untested',
+                compatibilityMessage: ep.compatibilityMessage,
+                manualConfirmed: ep.manualConfirmed,
+                createdAt: ep.createdAt || nowIso
+              });
+            }
+          }
+
+          for (const src of epSources) {
+            const rawSrc = (src.originalUrl || '').trim();
+            if (!rawSrc) continue;
+            const built = buildMgebUrl(rawSrc, src.useMgeb !== false);
+            const canonicalUrl = src.processedUrl?.trim() || (built.valid ? built.finalUrl : rawSrc);
+            const classified = classifySourceUrl(canonicalUrl);
+            if (!classified.valid) continue;
+            const ssrf = await validatePublicHttpUrl(classified.normalizedUrl);
+            if (!ssrf.safe) continue;
+
+            try {
+              const slots = await db.getVersionSlotsForContent({
+                contentId: Number(item.tmdbId || group.tmdbId),
+                contentType: 'tv',
+                seasonNumber: Number(season.seasonNumber),
+                episodeNumber: Number(ep.episodeNumber)
+              });
+              const ver = src.version === 'legendado' ? 'legendado' : 'dublado';
+              const existingList = ver === 'legendado' ? slots.legendado.sources : slots.dublado.sources;
+              const duplicateSrc = existingList.find(
+                s => (s.originalUrl || s.url || '').trim() === (classified.originalUrl || canonicalUrl).trim()
+              );
+              if (duplicateSrc) {
+                duplicatesSkipped++;
+                continue;
+              }
+
+              await db.upsertVersionSourceSlot({
+                contentId: Number(item.tmdbId || group.tmdbId),
+                contentType: 'tv',
+                seasonNumber: Number(season.seasonNumber),
+                episodeNumber: Number(ep.episodeNumber),
+                version: ver,
+                url: canonicalUrl,
+                serverName: src.serverName || (ver === 'legendado' ? 'Servidor Legendado' : 'Servidor Dublado'),
+                quality: src.quality || '1080p',
+                format: classified.suggestedFormat,
+                enabled: true,
+                replaceExisting: false,
+                status: src.compatibilityStatus === 'compatible' ? 'online' : 'registered',
+                diagnostics: classified.diagnostics,
+                adminEmail
+              });
+              sourcesAssociated++;
+              seriesSourcesCount++;
+            } catch (srcErr) {
+              console.error(`[SEASON_DISCOVERY_COMMIT] Source error T${season.seasonNumber}E${ep.episodeNumber}:`, srcErr);
+            }
+          }
+        }
+      }
+
+      importedSeriesCount++;
+      const mainDomain = (() => {
+        try {
+          return new URL(approvedSeasons[0].mainUrl).hostname;
+        } catch {
+          return '';
+        }
+      })();
+
+      db.addLinkImportHistory({
+        url: approvedSeasons[0].mainUrl,
+        domain: mainDomain,
+        status: isNew ? 'SUCCESS' : 'UPDATED',
+        tmdbId: Number(item.tmdbId || group.tmdbId),
+        type: 'tv',
+        title: item.title,
+        releaseYear: item.releaseYear,
+        seasonsImported: approvedSeasons.length,
+        episodesImported: seriesEpisodesCommitted,
+        sourceLinksDetected: seriesSourcesCount,
+        confidence: group.confidence,
+        details: `Descoberta Automática de Temporadas: ${approvedSeasons.length} temporada(s), ${seriesEpisodesCommitted} episódio(s), ${seriesSourcesCount} fonte(s) de vídeo.`,
+        adminEmail
+      });
+
+      db.addImportHistory({
+        adminEmail,
+        title: item.title,
+        tmdbId: Number(item.tmdbId || group.tmdbId),
+        type: 'tv',
+        status: 'SUCCESS',
+        details: `Importação Inteligente PRO (Descoberta de Temporadas): ${approvedSeasons.length}T / ${seriesEpisodesCommitted}E`
+      });
+
+      db.addAuditLog(
+        adminEmail,
+        'SMART_SEASON_BATCH_IMPORT',
+        'SUCCESS',
+        `${isNew ? 'Importada' : 'Atualizada'} série ${item.title} (TMDB ${group.tmdbId}): ${approvedSeasons.length} temporada(s), ${seriesEpisodesCommitted} episódio(s), ${seriesSourcesCount} fonte(s).`
+      );
+
+      results.push({
+        tmdbId: group.tmdbId,
+        type: 'tv',
+        title: item.title,
+        status: isNew ? 'IMPORTED' : 'UPDATED',
+        seasonsCount: approvedSeasons.length,
+        episodesCount: seriesEpisodesCommitted,
+        sourcesCount: seriesSourcesCount,
+        message: `${item.title}: ${approvedSeasons.length} temporada(s) e ${seriesEpisodesCommitted} episódio(s) gravados.`
+      });
+    }
+
+    if (job) {
+      job.seriesGroups = seriesGroups;
+      job.movieItems = movieItems;
+      job.currentTask = `Importação concluída: ${importedMoviesCount} filme(s), ${importedSeriesCount} série(s), ${seasonsCommitted} temporada(s), ${episodesCommitted} episódio(s).`;
+      recalculateJobStats(job);
+      db.saveSeasonDiscoveryJob(job);
+    }
+
+    invalidatePublicTrendingCache();
+
+    res.json({
+      success: true,
+      importedSeriesCount,
+      importedMoviesCount,
+      seasonsCommitted,
+      episodesCommitted,
+      duplicatesSkipped,
+      sourcesAssociated,
+      results,
+      job,
+      message: `Importação concluída: ${importedMoviesCount} filme(s), ${importedSeriesCount} série(s), ${seasonsCommitted} temporada(s) e ${episodesCommitted} episódio(s) gravados (${sourcesAssociated} fonte(s) associadas, ${duplicatesSkipped} duplicado(s) preservados).`
+    });
+  });
+
+  app.post('/api/admin/link-importer/candidate-details', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const { tmdbId, type, detectedEpisodeLinks } = req.body || {};
+      const idNum = parseInt(String(tmdbId), 10);
+      const mediaType: 'movie' | 'tv' = type === 'tv' ? 'tv' : 'movie';
+      if (isNaN(idNum) || idNum <= 0) {
+        return res.status(400).json({ error: 'TMDB ID inválido.' });
+      }
+
+      const existing = db.getMediaByTmdbAndType(idNum, mediaType);
+      const existingSeasonsCount = existing?.seasons?.length || 0;
+      const existingEpisodesCount = (existing?.seasons || []).reduce(
+        (acc, s) => acc + (s.episodes?.length || 0),
+        0
+      );
+
+      if (mediaType === 'movie') {
+        return res.json({
+          success: true,
+          seasonsPreview: [],
+          tmdbTotalSeasons: 0,
+          tmdbTotalEpisodes: 0,
+          sourceEpisodeLinksFound: 0,
+          duplicateCheck: {
+            isDuplicate: Boolean(existing),
+            existingMediaId: existing?.id || null,
+            existingTitle: existing?.title || null,
+            existingSeasonsCount: 0,
+            existingEpisodesCount: 0,
+            missingSeasonsCount: 0,
+            missingEpisodesCount: 0,
+            recommendedAction: existing ? 'update_metadata' : 'import_new'
+          }
+        });
+      }
+
+      const preview = await buildSeasonsPreviewForSeries(
+        idNum,
+        getLinkAnalyzerDeps(),
+        Array.isArray(detectedEpisodeLinks) ? detectedEpisodeLinks : [],
+        existing
+      );
+
+      const missingSeasonsCount = Math.max(0, preview.tmdbTotalSeasons - existingSeasonsCount);
+      const missingEpisodesCount = Math.max(0, preview.tmdbTotalEpisodes - existingEpisodesCount);
+
+      res.json({
+        success: true,
+        ...preview,
+        duplicateCheck: {
+          isDuplicate: Boolean(existing),
+          existingMediaId: existing?.id || null,
+          existingTitle: existing?.title || null,
+          existingSeasonsCount,
+          existingEpisodesCount,
+          missingSeasonsCount,
+          missingEpisodesCount,
+          recommendedAction: !existing
+            ? 'import_new'
+            : missingEpisodesCount > 0
+              ? 'merge_missing'
+              : 'update_metadata'
+        }
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Erro ao carregar detalhes do candidato.' });
+    }
+  });
+
+  app.post('/api/admin/link-importer/import', requireAdmin, async (req: Request, res: Response) => {
+    const adminEmail = (req as any).user?.email || ADMIN_EMAIL;
+    const {
+      sourceUrl,
+      tmdbId,
+      type,
+      customTitle,
+      categories,
+      duplicateMode = 'merge_missing',
+      selectedSeasonNumbers,
+      includeSpecials = false,
+      confidence,
+      sourceLinksDetected = 0,
+      movieSources,
+      seriesEpisodeSources
+    } = req.body || {};
+
     const mediaType: 'movie' | 'tv' = type === 'tv' ? 'tv' : 'movie';
-    const idNum = parseInt(tmdbId);
+    const idNum = parseInt(String(tmdbId), 10);
+    let domain = '';
+    try {
+      domain = sourceUrl ? new URL(String(sourceUrl)).hostname : '';
+    } catch {}
+
+    if (isNaN(idNum) || idNum <= 0) {
+      if (sourceUrl) {
+        db.addLinkImportHistory({
+          url: String(sourceUrl),
+          domain,
+          status: 'FAILED',
+          title: customTitle || 'Conteúdo não identificado',
+          details: 'TMDB ID inválido na confirmação da importação.',
+          adminEmail
+        });
+      }
+      return res.status(400).json({ error: 'TMDB ID inválido para importação.' });
+    }
+
+    const existing = db.getMediaByTmdbAndType(idNum, mediaType);
+    if (existing && duplicateMode === 'skip') {
+      const historyEntry = db.addLinkImportHistory({
+        url: String(sourceUrl || ''),
+        domain,
+        status: 'DUPLICATE',
+        tmdbId: idNum,
+        type: mediaType,
+        title: existing.title,
+        releaseYear: existing.releaseYear,
+        sourceLinksDetected: Number(sourceLinksDetected || 0),
+        confidence,
+        details: 'Ignorado — título já existente no catálogo.',
+        adminEmail
+      });
+      return res.json({
+        success: false,
+        exists: true,
+        duplicate: true,
+        item: existing,
+        historyEntry,
+        message: `${existing.title} já existe no catálogo.`
+      });
+    }
+
+    const tmdbData = await fetchTMDB(`/${mediaType}/${idNum}`, { append_to_response: 'credits,videos' });
+    if (!tmdbData) {
+      if (sourceUrl) {
+        db.addLinkImportHistory({
+          url: String(sourceUrl),
+          domain,
+          status: 'FAILED',
+          tmdbId: idNum,
+          type: mediaType,
+          title: customTitle || `TMDB ${idNum}`,
+          details: 'Conteúdo não localizado na API do TMDB durante a importação.',
+          adminEmail
+        });
+      }
+      return res.status(404).json({ error: 'Conteúdo não localizado na API do TMDB.' });
+    }
+
+    const formatted = formatTMDBMedia(tmdbData, mediaType);
+    if (customTitle && typeof customTitle === 'string' && customTitle.trim()) {
+      formatted.title = customTitle.trim();
+    }
+
+    const explicitCategories = Array.isArray(categories) ? db.normalizeCategories(categories) : undefined;
+    let importedEpisodesCount = 0;
+
+    if (mediaType === 'tv' && Array.isArray(formatted.seasons) && formatted.seasons.length > 0) {
+      const allowedSeasonSet =
+        Array.isArray(selectedSeasonNumbers) && selectedSeasonNumbers.length > 0
+          ? new Set(selectedSeasonNumbers.map((n: any) => Number(n)))
+          : null;
+
+      const candidateSeasons = formatted.seasons.filter((s: any) => {
+        const sNum = Number(s.seasonNumber);
+        if (allowedSeasonSet) return allowedSeasonSet.has(sNum);
+        return includeSpecials ? sNum >= 0 : sNum > 0;
+      });
+
+      const seasonsToFetch =
+        existing && duplicateMode === 'merge_missing'
+          ? candidateSeasons.filter((s: any) => {
+              const localSeason = (existing.seasons || []).find(
+                ls => Number(ls.seasonNumber) === Number(s.seasonNumber)
+              );
+              return !localSeason?.episodes || localSeason.episodes.length < Number(s.episodeCount || 1);
+            })
+          : candidateSeasons;
+
+      const populatedSeasons: any[] = [];
+      const CHUNK = 4;
+      for (let i = 0; i < seasonsToFetch.length; i += CHUNK) {
+        const batch = seasonsToFetch.slice(i, i + CHUNK);
+        const batchResults = await Promise.all(
+          batch.map(async (sn: any) => {
+            try {
+              const tmdbSeason = await fetchTMDB(`/tv/${idNum}/season/${sn.seasonNumber}`, {}, AbortSignal.timeout(10000));
+              if (!tmdbSeason || !Array.isArray(tmdbSeason.episodes)) return sn;
+              const episodes = tmdbSeason.episodes.map((ep: any) => ({
+                id: `ep-${ep.id}`,
+                tmdbId: idNum,
+                seasonNumber: Number(sn.seasonNumber),
+                episodeNumber: ep.episode_number,
+                title: ep.name || `Episódio ${ep.episode_number}`,
+                overview: ep.overview || 'Sinopse não disponível.',
+                duration: ep.runtime || 45,
+                stillPath: ep.still_path ? `https://image.tmdb.org/t/p/w500${ep.still_path}` : undefined,
+                airDate: ep.air_date,
+                voteAverage: ep.vote_average ? Number(ep.vote_average.toFixed(1)) : undefined
+              }));
+              importedEpisodesCount += episodes.length;
+              return {
+                id: `season-${sn.seasonNumber}`,
+                seasonNumber: Number(sn.seasonNumber),
+                name: tmdbSeason.name || sn.name || (Number(sn.seasonNumber) === 0 ? 'Especiais' : `Temporada ${sn.seasonNumber}`),
+                overview: tmdbSeason.overview || sn.overview || '',
+                posterPath: tmdbSeason.poster_path ? `https://image.tmdb.org/t/p/w500${tmdbSeason.poster_path}` : sn.posterPath,
+                episodeCount: Math.max(Number(sn.episodeCount || 0), episodes.length),
+                episodes
+              };
+            } catch {
+              return sn;
+            }
+          })
+        );
+        populatedSeasons.push(...batchResults);
+      }
+
+      if (populatedSeasons.length > 0) {
+        formatted.seasons = populatedSeasons.sort((a, b) => Number(a.seasonNumber) - Number(b.seasonNumber));
+      } else if (existing?.seasons) {
+        formatted.seasons = existing.seasons;
+      }
+    }
+
+    const { item, isNew } = db.upsertMediaItem(
+      {
+        ...formatted,
+        ...(explicitCategories !== undefined ? { categories: explicitCategories } : {}),
+        published: true,
+        importSource: 'smart_link_importer'
+      },
+      explicitCategories !== undefined ? { replaceCategories: Boolean(existing) } : undefined
+    );
+
+    const totalItemEpisodes = (item.seasons || []).reduce(
+      (acc, s) => acc + (s.episodes?.length || 0),
+      0
+    );
+    if (mediaType === 'tv') {
+      item.seasonsCount = item.seasons?.length || item.seasonsCount || 0;
+      item.episodesCount = totalItemEpisodes || item.episodesCount || 0;
+      item.published = true;
+      db.saveMedia(item);
+    }
+
+    // --- ASSOCIATE PLAYBACK SOURCES DIRECTLY (PREPARATION FOR PRODUCTION & PLAYER) ---
+    let associatedSourcesCount = 0;
+
+    // 1. Movie Sources Association
+    if (mediaType === 'movie') {
+      const sourcesList = Array.isArray(movieSources) && movieSources.length > 0
+        ? movieSources
+        : sourceUrl && typeof sourceUrl === 'string' && sourceUrl.trim()
+          ? [{ version: 'dublado' as const, url: sourceUrl.trim(), useMgebPrefix: req.body?.useMgebPrefix }]
+          : [];
+
+      for (const ms of sourcesList) {
+        const rawUrl = String(ms.url || '').trim();
+        if (!rawUrl) continue;
+        const stripped = stripMgebPrefix(rawUrl);
+        const shouldUseMgeb =
+          typeof ms.useMgebPrefix === 'boolean' ? ms.useMgebPrefix : stripped.hadPrefix;
+        const built = buildMgebUrl(rawUrl, shouldUseMgeb);
+        const canonicalUrl = built.valid ? built.finalUrl : rawUrl;
+        const classified = classifySourceUrl(canonicalUrl);
+        if (!classified.valid) continue;
+        const ssrf = await validatePublicHttpUrl(classified.normalizedUrl);
+        if (!ssrf.safe) continue;
+
+        try {
+          await db.upsertVersionSourceSlot({
+            contentId: item.tmdbId,
+            contentType: 'movie',
+            version: ms.version === 'legendado' ? 'legendado' : 'dublado',
+            url: canonicalUrl,
+            serverName: ms.serverName || (ms.version === 'legendado' ? 'Servidor Legendado' : 'Servidor Dublado'),
+            quality: ms.quality || '1080p',
+            format: ms.format && ms.format !== 'auto' ? ms.format : classified.suggestedFormat,
+            enabled: ms.enabled !== undefined ? Boolean(ms.enabled) : true,
+            isPrimary: ms.isPrimary !== undefined ? Boolean(ms.isPrimary) : undefined,
+            replaceExisting: typeof ms.replaceExisting === 'boolean' ? ms.replaceExisting : false,
+            status: ms.status === 'online' ? 'online' : 'registered',
+            diagnostics: classified.diagnostics,
+            adminEmail
+          });
+          associatedSourcesCount++;
+        } catch (srcErr) {
+          console.error('[IMPORT] Error auto-associating movie source:', srcErr);
+        }
+      }
+    }
+
+    // 2. Series Episode Sources Association
+    if (mediaType === 'tv' && Array.isArray(seriesEpisodeSources) && seriesEpisodeSources.length > 0) {
+      for (const es of seriesEpisodeSources) {
+        const rawUrl = String(es.url || '').trim();
+        if (!rawUrl) continue;
+        const sNum = Number(es.seasonNumber || 1);
+        const eNum = Number(es.episodeNumber || 1);
+        const stripped = stripMgebPrefix(rawUrl);
+        const shouldUseMgeb =
+          typeof es.useMgebPrefix === 'boolean' ? es.useMgebPrefix : stripped.hadPrefix;
+        const built = buildMgebUrl(rawUrl, shouldUseMgeb);
+        const canonicalUrl = built.valid ? built.finalUrl : rawUrl;
+        const classified = classifySourceUrl(canonicalUrl);
+        if (!classified.valid) continue;
+        const ssrf = await validatePublicHttpUrl(classified.normalizedUrl);
+        if (!ssrf.safe) continue;
+
+        try {
+          await db.upsertVersionSourceSlot({
+            contentId: item.tmdbId,
+            contentType: 'tv',
+            seasonNumber: sNum,
+            episodeNumber: eNum,
+            version: es.version === 'legendado' ? 'legendado' : 'dublado',
+            url: canonicalUrl,
+            serverName: es.serverName || (es.version === 'legendado' ? 'Servidor Legendado' : 'Servidor Dublado'),
+            quality: es.quality || '1080p',
+            format: es.format && es.format !== 'auto' ? es.format : classified.suggestedFormat,
+            enabled: es.enabled !== undefined ? Boolean(es.enabled) : true,
+            isPrimary: es.isPrimary !== undefined ? Boolean(es.isPrimary) : undefined,
+            replaceExisting: typeof es.replaceExisting === 'boolean' ? es.replaceExisting : false,
+            status: es.status === 'online' ? 'online' : 'registered',
+            diagnostics: classified.diagnostics,
+            adminEmail
+          });
+          associatedSourcesCount++;
+        } catch (srcErr) {
+          console.error(`[IMPORT] Error auto-associating series source T${sNum}E${eNum}:`, srcErr);
+        }
+      }
+    }
+
+    invalidatePublicTrendingCache();
+
+    const historyEntry = db.addLinkImportHistory({
+      url: String(sourceUrl || ''),
+      domain,
+      status: isNew ? 'SUCCESS' : 'UPDATED',
+      tmdbId: item.tmdbId,
+      type: mediaType,
+      title: item.title,
+      releaseYear: item.releaseYear,
+      seasonsImported: item.seasons?.length || 0,
+      episodesImported: importedEpisodesCount || totalItemEpisodes,
+      sourceLinksDetected: Number(sourceLinksDetected || 0),
+      confidence,
+      details: isNew
+        ? `Importado via Importação Inteligente (${mediaType === 'tv' ? `${item.seasons?.length || 0} temporadas / ${totalItemEpisodes} episódios` : 'Filme'}).`
+        : `Catálogo atualizado (${duplicateMode === 'merge_missing' ? 'temporadas/episódios em falta adicionados' : 'metadados atualizados'}).`,
+      adminEmail
+    });
+
+    db.addImportHistory({
+      adminEmail,
+      title: item.title,
+      tmdbId: Number(item.tmdbId || idNum),
+      type: mediaType,
+      status: 'SUCCESS',
+      details: isNew ? 'Importado via Importação Inteligente (Links)' : 'Atualizado via Importação Inteligente (Links)'
+    });
+
+    db.addAuditLog(
+      adminEmail,
+      'SMART_LINK_IMPORT',
+      'SUCCESS',
+      `${isNew ? 'Importado' : 'Atualizado'} [${mediaType.toUpperCase()}]: ${item.title} (TMDB ${item.tmdbId}) a partir de ${domain || 'link externo'}`
+    );
+
+    res.json({
+      success: true,
+      isNew,
+      item,
+      associatedSourcesCount,
+      historyEntry,
+      message: isNew
+        ? `${item.title} importado com sucesso para o catálogo.`
+        : `${item.title} atualizado sem duplicação.`
+    });
+  });
+
+  app.get('/api/admin/link-importer/history', requireAdmin, (_req: Request, res: Response) => {
+    res.json({
+      success: true,
+      history: db.getLinkImportHistory(100)
+    });
+  });
+
+  // 4. Update Existing Catalog Media Metadata from TMDB (Strictly Preserves Playback Links!)
+  app.post('/api/admin/tmdb/update', requireAdmin, async (req: Request, res: Response) => {
+    const { tmdbId, type, categories } = req.body;
+    const mediaType: 'movie' | 'tv' = type === 'tv' ? 'tv' : 'movie';
+    const idNum = parseInt(tmdbId, 10);
     const adminEmail = (req as any).user?.email || ADMIN_EMAIL;
 
     if (isNaN(idNum) || idNum <= 0) {
@@ -3029,7 +5921,16 @@ async function startServer() {
     }
 
     const formatted = formatTMDBMedia(tmdbData, mediaType);
-    const { item } = db.upsertMediaItem(formatted);
+    const explicitCategories = Array.isArray(categories) ? db.normalizeCategories(categories) : undefined;
+    const { item } = db.upsertMediaItem(
+      {
+        ...formatted,
+        ...(explicitCategories !== undefined ? { categories: explicitCategories } : {})
+      },
+      explicitCategories !== undefined ? { replaceCategories: true } : undefined
+    );
+
+    invalidatePublicTrendingCache();
 
     db.addImportHistory({
       adminEmail,
@@ -3037,7 +5938,7 @@ async function startServer() {
       tmdbId: item.tmdbId,
       type: mediaType,
       status: 'SUCCESS',
-      details: 'Dados atualizados a partir do TMDB'
+      details: 'Metadados atualizados via TMDB (fontes preservadas)'
     });
 
     db.addAuditLog(adminEmail, 'UPDATE', 'SUCCESS', `Atualizado [${mediaType.toUpperCase()}]: ${item.title} (TMDB: ${item.tmdbId})`);
@@ -3045,7 +5946,7 @@ async function startServer() {
     res.json({
       success: true,
       item,
-      message: `${item.title} foi atualizado com sucesso.`
+      message: `${item.title} teve os metadados atualizados com preservação integral das fontes.`
     });
   });
 
@@ -3172,10 +6073,11 @@ async function startServer() {
   // DEDICATED ADMIN CATALOG ENDPOINTS
   // ==========================================
 
-  // Admin Catalog Query (Strictly separated movies/series, source + diagnostic summaries, audit totals)
+  // Admin Catalog Query (Strictly separated movies/series + anime/dorama categories, source + diagnostic summaries, audit totals)
   app.get('/api/admin/catalog', requireAdmin, (req: Request, res: Response) => {
     const {
       type,
+      category,
       genre,
       search,
       yearFrom,
@@ -3194,6 +6096,7 @@ async function startServer() {
 
     const result = db.getAdminCatalog({
       type: type as string,
+      category: category as string,
       genre: genre as string,
       search: search as string,
       yearFrom: yearFrom ? parseInt(yearFrom as string, 10) : undefined,
@@ -3305,13 +6208,13 @@ async function startServer() {
     const sourceSummary = db.getMediaSourceSummary(item);
     const diagnosticReport = db.diagnoseMediaItem(item.id);
 
-    // Group episode sources for series
+    // Group episode sources for series (including Season 0 Specials!)
     const episodeSourcesMap = new Map<string, any[]>();
     if (isSeries) {
       for (const src of allSources) {
-        const sNum = Number(src.season ?? src.seasonNumber ?? 0);
+        const sNum = parseSeasonParam(src.season ?? src.seasonNumber, -1);
         const eNum = Number(src.episode ?? src.episodeNumber ?? 0);
-        if (sNum > 0 && eNum > 0) {
+        if (sNum >= 0 && eNum > 0) {
           const key = `${sNum}:${eNum}`;
           if (!episodeSourcesMap.has(key)) episodeSourcesMap.set(key, []);
           episodeSourcesMap.get(key)!.push(src);
@@ -3337,11 +6240,19 @@ async function startServer() {
                 ? 'OFFLINE'
                 : 'REGISTERED';
 
+            const compatibleEpSources = epSources.filter(src => {
+              if (src.enabled === false) return false;
+              const lower = (src.status || '').toLowerCase();
+              return !['offline', 'inactive', 'embed_blocked', 'unsupported_format', 'incompatible'].includes(lower);
+            });
+            const epVersionAvailability = computeVersionAvailability(epSources, compatibleEpSources, []);
+
             return {
               ...ep,
               sources: epSources,
               sourcesCount: epSources.length,
-              sourceStatus: epSourceStatus
+              sourceStatus: epSourceStatus,
+              versionAvailability: epVersionAvailability
             };
           });
 
@@ -3354,6 +6265,8 @@ async function startServer() {
         })
       : undefined;
 
+    const comparisonStats = isSeries && item.tmdbId ? db.getSeriesComparisonStats(item.tmdbId) : undefined;
+
     res.json({
       item: {
         ...item,
@@ -3362,7 +6275,8 @@ async function startServer() {
         diagnosticSummary: diagnosticReport?.item.diagnosticSummary
       },
       sources: allSources,
-      diagnostic: diagnosticReport
+      diagnostic: diagnosticReport,
+      comparisonStats
     });
   });
 
@@ -3377,6 +6291,7 @@ async function startServer() {
       return res.status(404).json({ error: 'Conteúdo não encontrado' });
     }
 
+    invalidatePublicTrendingCache();
     db.addAuditLog(adminEmail, 'UPDATE', 'SUCCESS', `Editado [${updated.type.toUpperCase()}]: ${updated.title} (ID: ${updated.id})`);
 
     res.json({
@@ -3397,6 +6312,8 @@ async function startServer() {
       return res.status(404).json({ error: 'Conteúdo não encontrado.' });
     }
 
+    invalidatePublicTrendingCache();
+
     res.json({
       success: true,
       item: result.item,
@@ -3415,6 +6332,7 @@ async function startServer() {
     if (!restored) {
       return res.status(404).json({ error: 'Conteúdo não encontrado para restauração.' });
     }
+    invalidatePublicTrendingCache();
     res.json({
       success: true,
       item: restored,
@@ -3440,6 +6358,7 @@ async function startServer() {
 
     try {
       const resData = db.toggleTop10(id, position);
+      invalidatePublicTrendingCache();
       const action = resData.isTop10 ? 'TOP10_ADD' : 'TOP10_REMOVE';
       db.addAuditLog(adminEmail, action, 'SUCCESS', `${resData.isTop10 ? 'Adicionado ao' : 'Removido do'} Top 10: ${resData.item.title}`);
       res.json({ success: true, ...resData });
@@ -3459,6 +6378,7 @@ async function startServer() {
 
     if (action === 'delete') {
       const result = db.batchDeleteMedia(ids, adminEmail, Boolean(permanent));
+      invalidatePublicTrendingCache();
       return res.json({
         success: true,
         affectedCount: result.successCount,
@@ -3474,6 +6394,7 @@ async function startServer() {
       for (const id of ids) {
         if (db.restoreMediaItem(id, adminEmail)) restoredCount++;
       }
+      invalidatePublicTrendingCache();
       return res.json({
         success: true,
         affectedCount: restoredCount,
@@ -3487,6 +6408,7 @@ async function startServer() {
       for (const id of ids) {
         if (db.togglePublishMedia(id, targetPub, adminEmail)) count++;
       }
+      invalidatePublicTrendingCache();
       return res.json({
         success: true,
         affectedCount: count,
@@ -3503,6 +6425,7 @@ async function startServer() {
           count++;
         }
       }
+      invalidatePublicTrendingCache();
       db.addAuditLog(adminEmail, 'TOP10_ADD', 'SUCCESS', `Atualizados ${count} itens no Top 10 em massa.`);
       return res.json({ success: true, affectedCount: count, message: `${count} itens atualizados no Top 10.` });
     }
@@ -3521,6 +6444,7 @@ async function startServer() {
           }
         }
       }
+      invalidatePublicTrendingCache();
       db.addAuditLog(adminEmail, 'BATCH_SYNC', 'SUCCESS', `Sincronizados ${syncedCount} itens do TMDB.`);
       return res.json({ success: true, affectedCount: syncedCount, message: `${syncedCount} itens sincronizados com o TMDB.` });
     }
@@ -3658,6 +6582,7 @@ async function startServer() {
 
     const result = db.deleteMediaItem(id, adminEmail, permanent);
     if (result.success) {
+      invalidatePublicTrendingCache();
       res.json({
         success: true,
         permanent,
@@ -3674,6 +6599,100 @@ async function startServer() {
   // Get Admin Users List
   app.get('/api/admin/users', requireFounder, (req: Request, res: Response) => {
     res.json(db.getAllUsers());
+  });
+
+  // --- ADS MANAGEMENT ADMIN ROUTES ---
+  app.get('/api/admin/ads', requireAdmin, (req: Request, res: Response) => {
+    res.json(db.getAdCampaigns());
+  });
+
+  app.post('/api/admin/ads', requireAdmin, (req: Request, res: Response) => {
+    const adminEmail = (req as any).user?.email || ADMIN_EMAIL;
+    const campaign = db.createAdCampaign({
+      ...req.body,
+      createdBy: adminEmail
+    });
+    db.addAuditLog(adminEmail, 'CREATE_AD_CAMPAIGN', 'SUCCESS', `Campanha de anúncios criada: ${campaign.name}`);
+    res.json({ success: true, campaign });
+  });
+
+  app.put('/api/admin/ads/:id', requireAdmin, (req: Request, res: Response) => {
+    const adminEmail = (req as any).user?.email || ADMIN_EMAIL;
+    const updated = db.updateAdCampaign(req.params.id, req.body);
+    if (!updated) {
+      return res.status(404).json({ success: false, error: 'Campanha não encontrada.' });
+    }
+    db.addAuditLog(adminEmail, 'UPDATE_AD_CAMPAIGN', 'SUCCESS', `Campanha de anúncios atualizada: ${updated.name}`);
+    res.json({ success: true, campaign: updated });
+  });
+
+  app.delete('/api/admin/ads/:id', requireAdmin, (req: Request, res: Response) => {
+    const adminEmail = (req as any).user?.email || ADMIN_EMAIL;
+    const deleted = db.deleteAdCampaign(req.params.id);
+    if (!deleted) {
+      return res.status(404).json({ success: false, error: 'Campanha não encontrada.' });
+    }
+    db.addAuditLog(adminEmail, 'DELETE_AD_CAMPAIGN', 'SUCCESS', `Campanha de anúncios eliminada: ${req.params.id}`);
+    res.json({ success: true });
+  });
+
+  app.post('/api/admin/ads/:id/duplicate', requireAdmin, (req: Request, res: Response) => {
+    const adminEmail = (req as any).user?.email || ADMIN_EMAIL;
+    const dup = db.duplicateAdCampaign(req.params.id);
+    if (!dup) {
+      return res.status(404).json({ success: false, error: 'Campanha não encontrada.' });
+    }
+    db.addAuditLog(adminEmail, 'DUPLICATE_AD_CAMPAIGN', 'SUCCESS', `Campanha duplicada: ${dup.name}`);
+    res.json({ success: true, campaign: dup });
+  });
+
+  // --- USER ADMIN STATUS UPDATE ROUTE ---
+  app.patch('/api/admin/users/:id/status', requireAdmin, (req: Request, res: Response) => {
+    const adminEmail = (req as any).user?.email || ADMIN_EMAIL;
+    const updated = db.updateUserAdminStatus(req.params.id, req.body);
+    if (!updated) {
+      return res.status(404).json({ success: false, error: 'Utilizador não encontrado.' });
+    }
+    db.addAuditLog(adminEmail, 'ADMIN_UPDATE_USER_STATUS', 'SUCCESS', `Utilizador ${updated.email} atualizado: ${JSON.stringify(req.body)}`);
+    res.json({ success: true, user: updated });
+  });
+
+  // --- PUBLIC / PLAYER AD DISTRIBUTION ENDPOINT ---
+  app.get('/api/v1/ads', (req: Request, res: Response) => {
+    const location = String(req.query.location || 'global').toLowerCase();
+    const globalCfg = db.getApiGlobalSettings();
+    
+    if (globalCfg.enabled === false) {
+      return res.json({ success: true, ads: [] });
+    }
+
+    const campaigns = db.getAdCampaigns();
+    const activeAds = campaigns.filter(c => {
+      if (c.status !== 'ACTIVE') return false;
+      const matchesLocation = c.displayLocation.includes('global') || c.displayLocation.includes(location) || c.displayLocation.some(l => location.includes(l));
+      if (!matchesLocation) return false;
+      return true;
+    }).map(c => {
+      db.recordAdImpression(c.id);
+      return {
+        id: c.id,
+        name: c.name,
+        type: c.type,
+        codeOrLink: c.codeOrLink,
+        frequency: c.frequency,
+        priority: c.priority || 1
+      };
+    });
+
+    res.json({
+      success: true,
+      ads: activeAds
+    });
+  });
+
+  app.post('/api/v1/ads/:id/click', (req: Request, res: Response) => {
+    db.recordAdClick(req.params.id);
+    res.json({ success: true });
   });
 
   // ==========================================
@@ -3925,8 +6944,8 @@ async function startServer() {
         contentId: Number(body.contentId),
         contentType: normType,
         url: classified.originalUrl,
-        seasonNumber: normType === 'tv' ? Number(body.seasonNumber || 1) : undefined,
-        episodeNumber: normType === 'tv' ? Number(body.episodeNumber || 1) : undefined
+        seasonNumber: normType === 'tv' ? parseSeasonParam(body.seasonNumber, 1) : undefined,
+        episodeNumber: normType === 'tv' ? Math.max(1, Number(body.episodeNumber || 1)) : undefined
       });
 
       if (duplicate && !body.replaceExisting) {
@@ -3941,19 +6960,56 @@ async function startServer() {
         await db.deleteVideoSource(duplicate.id);
       }
 
+      let cleanSubtitleUrl: string | undefined;
+      if (body.subtitleUrl !== undefined && String(body.subtitleUrl || '').trim()) {
+        const subRaw = String(body.subtitleUrl).trim();
+        let parsedSub: URL;
+        try {
+          parsedSub = new URL(subRaw);
+        } catch {
+          return res.status(400).json({ error: 'URL da legenda externa inválida.' });
+        }
+        if (parsedSub.protocol !== 'http:' && parsedSub.protocol !== 'https:') {
+          return res.status(400).json({ error: 'A URL da legenda deve usar http:// ou https://.' });
+        }
+        const subSsrf = await validatePublicHttpUrl(parsedSub.toString());
+        if (!subSsrf.safe) {
+          return res.status(400).json({ error: subSsrf.reason || 'URL da legenda bloqueada pela política SSRF.' });
+        }
+        cleanSubtitleUrl = parsedSub.toString();
+      }
+
       // Preserve originalUrl intact (NEVER strip ?url= on PHP_VIDEO_ENDPOINT like mgeb.space/mp4.php?url=...)
       const parsedPriority = body.priority !== undefined ? Number(body.priority) : 1;
+      const normalizedVer = normalizeVersionType(body.versionType, body.serverName, body.audioLanguage);
       const source = await db.addVideoSource({
         ...body,
+        versionType: normalizedVer || body.versionType,
+        audioLanguage:
+          body.audioLanguage ||
+          (normalizedVer === 'legendado' ? 'Original' : normalizedVer === 'dublado' ? 'Português' : undefined),
         url: classified.originalUrl,
         originalUrl: classified.originalUrl,
         sourceKind: classified.sourceKind,
         format: body.format || classified.suggestedFormat,
+        subtitleUrl: cleanSubtitleUrl,
         priority: !isNaN(parsedPriority) && parsedPriority > 0 ? Math.floor(parsedPriority) : 1,
         enabled: body.enabled !== undefined ? Boolean(body.enabled) : true,
         status: body.status && body.status !== 'unverified' ? body.status : 'registered',
         diagnostics: body.diagnostics || classified.diagnostics
       });
+      const adminUser = (req as any).user?.email || ADMIN_EMAIL;
+      const scopeTag =
+        normType === 'tv'
+          ? `[TMDB ${Number(body.contentId)} T${parseSeasonParam(body.seasonNumber, 1)}E${Math.max(1, Number(body.episodeNumber || 1))}]`
+          : `[TMDB ${Number(body.contentId)}]`;
+      await db.addAuditLog(
+        adminUser,
+        'VIDEO_SOURCE_ADDED',
+        'SUCCESS',
+        `[VERSÃO] ${scopeTag} Fonte (${normalizedVer || 'padrão'}) adicionada: ${classified.originalUrl}`
+      );
+      invalidatePublicTrendingCache();
       res.json(source);
     } catch (err: any) {
       res.status(500).json({ error: err?.message || 'Erro ao adicionar fonte de vídeo' });
@@ -3971,7 +7027,7 @@ async function startServer() {
 
   app.post('/api/admin/video-sources/season-templates', requireAdmin, async (req: Request, res: Response) => {
     try {
-      const { contentId, seasonNumber, baseUrl, useMgebPrefix, serverName, format, audioLanguage, quality } = req.body || {};
+      const { contentId, seasonNumber, baseUrl, useMgebPrefix, serverName, format, audioLanguage, subtitleLanguage, versionType, subtitleUrl, quality } = req.body || {};
       const numId = parseInt(String(contentId), 10);
       const sNum = parseInt(String(seasonNumber), 10);
       if (isNaN(numId) || numId <= 0 || isNaN(sNum) || sNum < 0 || !baseUrl || typeof baseUrl !== 'string') {
@@ -3985,6 +7041,22 @@ async function startServer() {
       if (!ssrf.safe) {
         return res.status(400).json({ error: ssrf.reason || 'URL bloqueada pela política de segurança SSRF.' });
       }
+      let cleanTemplateSubUrl: string | undefined;
+      if (subtitleUrl && String(subtitleUrl).trim()) {
+        try {
+          const parsedSub = new URL(String(subtitleUrl).trim());
+          if (parsedSub.protocol !== 'http:' && parsedSub.protocol !== 'https:') {
+            return res.status(400).json({ error: 'A URL da legenda deve usar http:// ou https://.' });
+          }
+          const subSsrf = await validatePublicHttpUrl(parsedSub.toString());
+          if (!subSsrf.safe) {
+            return res.status(400).json({ error: subSsrf.reason || 'URL da legenda bloqueada pela política SSRF.' });
+          }
+          cleanTemplateSubUrl = parsedSub.toString();
+        } catch {
+          return res.status(400).json({ error: 'URL da legenda externa inválida.' });
+        }
+      }
       const saved = db.saveSeasonSourceTemplate({
         contentId: numId,
         seasonNumber: sNum,
@@ -3993,6 +7065,9 @@ async function startServer() {
         serverName,
         format,
         audioLanguage,
+        subtitleLanguage,
+        versionType,
+        subtitleUrl: cleanTemplateSubUrl,
         quality
       });
       res.json({ success: true, template: saved });
@@ -4015,8 +7090,8 @@ async function startServer() {
       if (isNaN(contentId) || contentId <= 0 || isNaN(seasonNumber) || seasonNumber < 0) {
         return res.status(400).json({ error: 'TMDB ID e Temporada válidos são obrigatórios.' });
       }
-      if (episodes.length === 0 || episodes.length > 500) {
-        return res.status(400).json({ error: 'Forneça entre 1 e 500 episódios válidos para guardar.' });
+      if (episodes.length === 0) {
+        return res.status(400).json({ error: 'Forneça pelo menos 1 episódio válido para guardar.' });
       }
 
       // Enforce manual import only rule: series must already be in catalog
@@ -4052,6 +7127,23 @@ async function startServer() {
         });
       }
 
+      let cleanBatchSubUrl: string | undefined;
+      if (body.subtitleUrl && String(body.subtitleUrl).trim()) {
+        try {
+          const parsedSub = new URL(String(body.subtitleUrl).trim());
+          if (parsedSub.protocol !== 'http:' && parsedSub.protocol !== 'https:') {
+            return res.status(400).json({ error: 'A URL da legenda deve usar http:// ou https://.' });
+          }
+          const subSsrf = await validatePublicHttpUrl(parsedSub.toString());
+          if (!subSsrf.safe) {
+            return res.status(400).json({ error: subSsrf.reason || 'URL da legenda bloqueada pela política SSRF.' });
+          }
+          cleanBatchSubUrl = parsedSub.toString();
+        } catch {
+          return res.status(400).json({ error: 'URL da legenda externa inválida.' });
+        }
+      }
+
       const adminEmail = (req as any).user?.email || ADMIN_EMAIL;
       const result = await db.saveBatchEpisodeSources({
         contentId,
@@ -4061,6 +7153,9 @@ async function startServer() {
         serverName: body.serverName,
         format: body.format,
         audioLanguage: body.audioLanguage,
+        subtitleLanguage: body.subtitleLanguage,
+        versionType: body.versionType,
+        subtitleUrl: cleanBatchSubUrl,
         quality: body.quality,
         isPrimary: body.isPrimary,
         priority: body.priority !== undefined ? Number(body.priority) : 1,
@@ -4070,13 +7165,14 @@ async function startServer() {
         episodes: validatedEpisodes
       });
 
+      invalidatePublicTrendingCache();
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: err?.message || 'Erro ao guardar episódios em lote.' });
     }
   });
 
-  app.patch('/api/admin/video-sources/:id', requireAdmin, async (req: Request, res: Response) => {
+  const handleUpdateVideoSource = async (req: Request, res: Response) => {
     try {
       const updates = { ...(req.body || {}) };
       if (updates.priority !== undefined) {
@@ -4085,6 +7181,9 @@ async function startServer() {
       }
       if (updates.enabled !== undefined) {
         updates.enabled = Boolean(updates.enabled);
+      }
+      if (updates.versionType !== undefined) {
+        updates.versionType = normalizeVersionType(updates.versionType) || updates.versionType;
       }
       if (updates.url) {
         const classified = classifySourceUrl(String(updates.url));
@@ -4099,19 +7198,293 @@ async function startServer() {
         updates.originalUrl = classified.originalUrl;
         updates.sourceKind = updates.sourceKind || classified.sourceKind;
       }
+      if (updates.subtitleUrl !== undefined) {
+        const subRaw = String(updates.subtitleUrl || '').trim();
+        if (!subRaw) {
+          updates.subtitleUrl = '';
+        } else {
+          let parsedSub: URL;
+          try {
+            parsedSub = new URL(subRaw);
+          } catch {
+            return res.status(400).json({ error: 'URL da legenda externa inválida.' });
+          }
+          if (parsedSub.protocol !== 'http:' && parsedSub.protocol !== 'https:') {
+            return res.status(400).json({ error: 'A URL da legenda deve usar http:// ou https://.' });
+          }
+          const subSsrf = await validatePublicHttpUrl(parsedSub.toString());
+          if (!subSsrf.safe) {
+            return res.status(400).json({ error: subSsrf.reason || 'URL da legenda bloqueada pela política SSRF.' });
+          }
+          updates.subtitleUrl = parsedSub.toString();
+        }
+      }
       const source = await db.updateVideoSource(req.params.id, updates);
+      invalidatePublicTrendingCache();
       res.json(source);
     } catch (err: any) {
       res.status(500).json({ error: err?.message || 'Erro ao atualizar fonte de vídeo' });
     }
-  });
+  };
+
+  app.patch('/api/admin/video-sources/:id', requireAdmin, handleUpdateVideoSource);
+  app.put('/api/admin/video-sources/:id', requireAdmin, handleUpdateVideoSource);
 
   app.delete('/api/admin/video-sources/:id', requireAdmin, async (req: Request, res: Response) => {
     try {
       await db.deleteVideoSource(req.params.id);
+      invalidatePublicTrendingCache();
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: 'Erro ao remover fonte de vídeo' });
+    }
+  });
+
+  // --- DEDICATED DUAL-VERSION SLOTS (DUBLADA & LEGENDADA) ---
+  app.get('/api/admin/versions/:contentType/:tmdbId', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const rawType = String(req.params.contentType || 'movie').toLowerCase();
+      const contentType = rawType === 'tv' || rawType === 'series' ? 'tv' : 'movie';
+      const tmdbId = parseInt(String(req.params.tmdbId || '0'), 10);
+      if (isNaN(tmdbId) || tmdbId <= 0) {
+        return res.status(400).json({ error: 'TMDB ID inválido.' });
+      }
+      const seasonNumber =
+        contentType === 'tv' ? parseSeasonParam(req.query.season, 1) : undefined;
+      const episodeNumber =
+        contentType === 'tv' ? Math.max(1, parseInt(String(req.query.episode || '1'), 10) || 1) : undefined;
+
+      const slots = await db.getVersionSlotsForContent({
+        contentId: tmdbId,
+        contentType,
+        seasonNumber,
+        episodeNumber
+      });
+      const { compatible, rejected } = evaluateSourcesLocally(slots.allSources);
+      const versionAvailability = computeVersionAvailability(slots.allSources, compatible, rejected);
+
+      res.json({
+        success: true,
+        ...slots,
+        versionAvailability
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Erro ao consultar versões de reprodução.' });
+    }
+  });
+
+  app.put('/api/admin/versions/:contentType/:tmdbId', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const rawType = String(req.params.contentType || 'movie').toLowerCase();
+      const contentType = rawType === 'tv' || rawType === 'series' ? 'tv' : 'movie';
+      const tmdbId = parseInt(String(req.params.tmdbId || '0'), 10);
+      if (isNaN(tmdbId) || tmdbId <= 0) {
+        return res.status(400).json({ error: 'TMDB ID inválido.' });
+      }
+
+      const body = req.body || {};
+      const seasonNumber =
+        contentType === 'tv' ? parseSeasonParam(body.seasonNumber ?? req.query.season, 1) : undefined;
+      const episodeNumber =
+        contentType === 'tv'
+          ? Math.max(1, parseInt(String(body.episodeNumber ?? req.query.episode ?? '1'), 10) || 1)
+          : undefined;
+      const adminUser = (req as any).user?.email || ADMIN_EMAIL;
+
+      const normalizeSlotList = (): Array<{
+        version: 'dublado' | 'legendado';
+        url: string;
+        useMgebPrefix?: boolean;
+        serverName?: string;
+        quality?: string;
+        format?: string;
+        enabled?: boolean;
+        isPrimary?: boolean;
+        sourceId?: string;
+        replaceExisting?: boolean;
+        verify?: boolean;
+      }> => {
+        if (Array.isArray(body.slots)) {
+          return body.slots;
+        }
+        if (body.dublado || body.legendado) {
+          const list: any[] = [];
+          if (body.dublado && typeof body.dublado.url === 'string' && body.dublado.url.trim()) {
+            list.push({ version: 'dublado', ...body.dublado });
+          }
+          if (body.legendado && typeof body.legendado.url === 'string' && body.legendado.url.trim()) {
+            list.push({ version: 'legendado', ...body.legendado });
+          }
+          return list;
+        }
+        if (body.version === 'dublado' || body.version === 'legendado') {
+          return [
+            {
+              version: body.version,
+              url: body.url,
+              useMgebPrefix: body.useMgebPrefix,
+              serverName: body.serverName,
+              quality: body.quality,
+              format: body.format,
+              enabled: body.enabled,
+              isPrimary: body.isPrimary,
+              sourceId: body.sourceId,
+              replaceExisting: body.replaceExisting,
+              verify: body.verify
+            }
+          ];
+        }
+        return [];
+      };
+
+      const slotRequests = normalizeSlotList();
+      if (slotRequests.length === 0) {
+        return res.status(400).json({
+          error: 'Informe version ("dublado" | "legendado") e url válida para guardar.'
+        });
+      }
+
+      const duplicateWarnings: string[] = [];
+      const savedResults: any[] = [];
+      let latestSlots: any = null;
+
+      for (const item of slotRequests) {
+        if (item.version !== 'dublado' && item.version !== 'legendado') {
+          return res.status(400).json({ error: `Versão inválida: ${item.version}. Utilize dublado ou legendado.` });
+        }
+        const rawInput = String(item.url || '').trim();
+        let targetUrl = rawInput;
+        if (typeof item.useMgebPrefix === 'boolean') {
+          const built = buildMgebUrl(rawInput, item.useMgebPrefix);
+          if (!built.valid) {
+            return res.status(400).json({
+              error: `${item.version === 'dublado' ? 'Versão Dublada' : 'Versão Legendada'}: ${built.error || 'URL inválida.'}`
+            });
+          }
+          targetUrl = built.finalUrl;
+        }
+        const classified = classifySourceUrl(targetUrl);
+        if (!classified.valid) {
+          return res.status(400).json({
+            error: `${item.version === 'dublado' ? 'Versão Dublada' : 'Versão Legendada'}: ${classified.error || 'URL inválida.'}`
+          });
+        }
+        const ssrf = await validatePublicHttpUrl(classified.normalizedUrl);
+        if (!ssrf.safe) {
+          return res.status(400).json({
+            error: `${item.version === 'dublado' ? 'Versão Dublada' : 'Versão Legendada'}: ${ssrf.reason || 'URL bloqueada pela política de segurança SSRF.'}`
+          });
+        }
+
+        let probeStatus: string = 'registered';
+        let probeMessage: string | undefined;
+        let probeDiag = classified.diagnostics;
+        let resolvedFormat = item.format && item.format !== 'auto' ? item.format : classified.suggestedFormat;
+
+        if (item.verify) {
+          const probe = await probeVideoSource(classified.originalUrl);
+          probeStatus = probe.status;
+          probeMessage = probe.message;
+          probeDiag = probe.diagnostics;
+          if (!item.format || item.format === 'auto') {
+            resolvedFormat = probe.detectedFormat;
+          }
+        }
+
+        const result = await db.upsertVersionSourceSlot({
+          contentId: tmdbId,
+          contentType,
+          seasonNumber,
+          episodeNumber,
+          version: item.version,
+          url: classified.originalUrl,
+          serverName: item.serverName,
+          quality: item.quality,
+          format: resolvedFormat,
+          enabled: item.enabled,
+          isPrimary: item.isPrimary,
+          status: probeStatus,
+          verificationResult: probeMessage,
+          diagnostics: probeDiag,
+          sourceId: item.sourceId,
+          replaceExisting: item.replaceExisting,
+          adminEmail: adminUser
+        });
+
+        if (result.duplicateWarning) duplicateWarnings.push(result.duplicateWarning);
+        savedResults.push({
+          version: item.version,
+          action: result.action,
+          source: result.saved,
+          duplicateWarning: result.duplicateWarning
+        });
+        latestSlots = result.slots;
+      }
+
+      const finalSlots =
+        latestSlots ||
+        (await db.getVersionSlotsForContent({
+          contentId: tmdbId,
+          contentType,
+          seasonNumber,
+          episodeNumber
+        }));
+      const { compatible, rejected } = evaluateSourcesLocally(finalSlots.allSources);
+      const versionAvailability = computeVersionAvailability(finalSlots.allSources, compatible, rejected);
+
+      invalidatePublicTrendingCache();
+      res.json({
+        success: true,
+        results: savedResults,
+        duplicateWarnings,
+        ...finalSlots,
+        versionAvailability
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Erro ao guardar versão de reprodução.' });
+    }
+  });
+
+  app.delete('/api/admin/versions/:contentType/:tmdbId/:version', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const rawType = String(req.params.contentType || 'movie').toLowerCase();
+      const contentType = rawType === 'tv' || rawType === 'series' ? 'tv' : 'movie';
+      const tmdbId = parseInt(String(req.params.tmdbId || '0'), 10);
+      const version = String(req.params.version || '').toLowerCase();
+      if (isNaN(tmdbId) || tmdbId <= 0) {
+        return res.status(400).json({ error: 'TMDB ID inválido.' });
+      }
+      if (version !== 'dublado' && version !== 'legendado') {
+        return res.status(400).json({ error: 'Versão inválida. Utilize dublado ou legendado.' });
+      }
+      const seasonNumber =
+        contentType === 'tv' ? parseSeasonParam(req.query.season, 1) : undefined;
+      const episodeNumber =
+        contentType === 'tv' ? Math.max(1, parseInt(String(req.query.episode || '1'), 10) || 1) : undefined;
+      const sourceId = typeof req.query.sourceId === 'string' && req.query.sourceId.trim() ? req.query.sourceId.trim() : undefined;
+      const adminUser = (req as any).user?.email || ADMIN_EMAIL;
+
+      const result = await db.deleteVersionSourceSlot({
+        contentId: tmdbId,
+        contentType,
+        version: version as 'dublado' | 'legendado',
+        sourceId,
+        seasonNumber,
+        episodeNumber,
+        adminEmail: adminUser
+      });
+      const { compatible, rejected } = evaluateSourcesLocally(result.slots.allSources);
+      const versionAvailability = computeVersionAvailability(result.slots.allSources, compatible, rejected);
+
+      invalidatePublicTrendingCache();
+      res.json({
+        success: true,
+        removedCount: result.removedCount,
+        ...result.slots,
+        versionAvailability
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Erro ao remover versão de reprodução.' });
     }
   });
 
@@ -4184,8 +7557,8 @@ async function startServer() {
   app.post('/api/admin/sources/verify-batch', requireAdmin, async (req: Request, res: Response) => {
     try {
       const items = Array.isArray(req.body?.items) ? req.body.items : [];
-      if (items.length === 0 || items.length > 60) {
-        return res.status(400).json({ error: 'Forneça entre 1 e 60 links para verificação em lote.' });
+      if (items.length === 0) {
+        return res.status(400).json({ error: 'Forneça pelo menos 1 link para verificação em lote.' });
       }
 
       const results: Array<{ episodeNumber: number; url: string; probe: any }> = [];
@@ -4260,7 +7633,8 @@ async function startServer() {
         return res.status(400).json({ success: false, code: 'INVALID_ID', error: 'ID do conteúdo inválido.' });
       }
 
-      const rawType = String(req.query.type || inferredTypeFromPrefix || 'movie').toLowerCase();
+      const hasTvEpisodeQuery = req.query.season !== undefined || req.query.episode !== undefined;
+      const rawType = String(req.query.type || inferredTypeFromPrefix || (hasTvEpisodeQuery ? 'tv' : 'movie')).toLowerCase();
       const mediaType: 'movie' | 'tv' = rawType === 'tv' || rawType === 'series' ? 'tv' : 'movie';
       const season = req.query.season ? parseInt(String(req.query.season), 10) : 1;
       const episode = req.query.episode ? parseInt(String(req.query.episode), 10) : 1;
@@ -4354,19 +7728,22 @@ async function startServer() {
         }
       } else {
         const globalCfg = db.getApiGlobalSettings();
-        if (isExternalOrigin && globalCfg.requireDomainForEmbed) {
-          db.recordPlaybackEvent({
-            contentId: numericId,
-            mediaType,
-            origin: originHost,
-            status: 'DENIED',
-            errorMessage: 'Incorporação externa sem token autorizado.'
-          });
-          return res.status(403).json({
-            success: false,
-            code: 'DOMAIN_NOT_AUTHORIZED',
-            error: 'Incorporação externa requer token de reprodução autorizado para o seu domínio.'
-          });
+        const registeredDomains = getAllRegisteredAuthorizedDomains();
+        if (isExternalOrigin && globalCfg.requireDomainForEmbed && registeredDomains.length > 0) {
+          if (!originHost || !isHostInAuthorizedDomains(originHost, registeredDomains)) {
+            db.recordPlaybackEvent({
+              contentId: numericId,
+              mediaType,
+              origin: originHost,
+              status: 'DENIED',
+              errorMessage: `Domínio "${originHost || 'desconhecido'}" não autorizado para incorporação.`
+            });
+            return res.status(403).json({
+              success: false,
+              code: 'DOMAIN_NOT_AUTHORIZED',
+              error: `O domínio "${originHost || 'externo'}" não está autorizado a incorporar este player. Registe-o no Portal Dev ou utilize um token válido.`
+            });
+          }
         }
       }
 
@@ -4405,13 +7782,8 @@ async function startServer() {
       });
       const allSources = mergeAndDedupeSources(localSources, vSources);
 
-      const isDisabledStatus = (src: any) => {
-        if (src?.enabled === false) return true;
-        const lower = (src?.status || '').toLowerCase();
-        return lower === 'inactive' || lower === 'offline' || lower === 'unsupported_format' || lower === 'embed_blocked';
-      };
-
-      const playableSources = allSources.filter(src => !isDisabledStatus(src));
+      const { compatible: playableSources, rejected: rejectedSources } = await evaluateSourcesForPlayback(allSources);
+      const versionAvailability = computeVersionAvailability(allSources, playableSources, rejectedSources);
       const primary = playableSources[0];
       const mappedPlayable = playableSources.map(src => ({
         ...sanitizeSourceForApi(src),
@@ -4431,6 +7803,11 @@ async function startServer() {
           : undefined;
 
       if (playableSources.length > 0 && primary) {
+        const nextEpisode =
+          mediaType === 'tv'
+            ? await resolveNextEpisodeInfo(resolvedMedia, numericId, season, episode)
+            : undefined;
+
         db.recordPlaybackEvent({
           contentId: numericId,
           mediaType,
@@ -4463,8 +7840,22 @@ async function startServer() {
           source: mappedPlayable[0],
           sources: mappedPlayable,
           alternativeSources: mappedPlayable.slice(1),
-          nextEpisode: mediaType === 'tv' ? { available: true, season, episode: episode + 1 } : undefined,
+          nextEpisode,
+          versionAvailability,
           message: 'Sessão de reprodução autorizada.'
+        });
+      }
+
+      if (allSources.length > 0 && rejectedSources.length > 0) {
+        db.recordPlaybackEvent({
+          contentId: numericId,
+          mediaType,
+          season: mediaType === 'tv' ? season : undefined,
+          episode: mediaType === 'tv' ? episode : undefined,
+          appId: verifiedApp?.id || null,
+          origin: originHost,
+          status: 'ERROR',
+          errorMessage: rejectedSources[0].reason
         });
       }
 
@@ -4499,9 +7890,10 @@ async function startServer() {
         source: null,
         sources: [],
         alternativeSources: [],
+        versionAvailability,
         message:
           allSources.length > 0
-            ? 'Não foi possível reproduzir este conteúdo. Tente novamente mais tarde.'
+            ? rejectedSources[0]?.reason || 'Não foi possível reproduzir este conteúdo. Tente novamente mais tarde.'
             : 'Este conteúdo ainda não possui uma fonte de reprodução disponível.'
       });
     } catch (err: any) {
@@ -4836,6 +8228,58 @@ async function startServer() {
     });
   });
 
+  // Safe External Subtitle Fetch Proxy (SRT / VTT) with SSRF guard
+  app.get('/api/subtitles/fetch', async (req: Request, res: Response) => {
+    try {
+      const targetUrl = String(req.query.url || '').trim();
+      if (!targetUrl) {
+        return res.status(400).json({ success: false, error: 'URL da legenda obrigatória.' });
+      }
+      const ssrf = await validatePublicHttpUrl(targetUrl);
+      if (!ssrf.safe) {
+        return res.status(400).json({ success: false, error: ssrf.reason || 'URL de legenda bloqueada pela política de segurança.' });
+      }
+      const upstream = await fetch(targetUrl, {
+        headers: {
+          'User-Agent': 'RONYCINE-Subtitle-Loader/1.0',
+          Accept: 'text/vtt, text/plain, application/x-subrip, */*'
+        },
+        signal: AbortSignal.timeout(10000)
+      });
+      if (!upstream.ok) {
+        return res.status(upstream.status).json({
+          success: false,
+          error: `Não foi possível obter a legenda (HTTP ${upstream.status}).`
+        });
+      }
+      const contentType = (upstream.headers.get('content-type') || '').toLowerCase();
+      if (contentType.includes('text/html')) {
+        return res.status(422).json({
+          success: false,
+          error: 'O link informado devolveu uma página HTML em vez de um ficheiro de legenda SRT/VTT.'
+        });
+      }
+      const text = await upstream.text();
+      if (text.length > 2 * 1024 * 1024) {
+        return res.status(413).json({ success: false, error: 'Ficheiro de legenda excede o limite de 2MB.' });
+      }
+      if (/^\s*<!doctype\s+html/i.test(text) || /^\s*<html\b/i.test(text)) {
+        return res.status(422).json({
+          success: false,
+          error: 'O conteúdo devolvido é HTML e não uma legenda SRT/VTT válida.'
+        });
+      }
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('Cache-Control', 'public, max-age=300');
+      return res.send(text);
+    } catch (err: any) {
+      return res.status(500).json({
+        success: false,
+        error: err?.message || 'Falha ao carregar ficheiro de legenda externo.'
+      });
+    }
+  });
+
   // --- RONYCINE PROVIDER RESOLVER & CONFIG API ---
   app.post('/api/v1/providers/resolve', async (req: Request, res: Response) => {
     try {
@@ -5002,21 +8446,23 @@ async function startServer() {
           sourceKind: probe.sourceKind,
           format: probe.detectedFormat,
           isDirect: true,
-          directUrl: classified.originalUrl,
+          directUrl: probe.finalUrl || classified.originalUrl,
           embedUrl: classified.originalUrl,
+          fallbackToIframe: classified.sourceKind === 'PHP_VIDEO_ENDPOINT',
           diagnostics: probe.diagnostics,
           note: probe.message
         });
       }
 
-      if (mode === 'iframe') {
+      // Only allow iframe playback for EMBED_PLAYER when explicitly embeddable (never treat normal HTML pages as video)
+      if (mode === 'iframe' && probe.sourceKind === 'EMBED_PLAYER' && probe.diagnostics.embedAllowed !== false) {
         return res.json({
           success: true,
           provider: classified.suggestedServerName || 'Player Incorporado',
           sourceKind: probe.sourceKind,
           format: 'iframe',
           isDirect: false,
-          embedUrl: classified.originalUrl,
+          embedUrl: probe.finalUrl || classified.originalUrl,
           diagnostics: probe.diagnostics,
           note: probe.message
         });
@@ -5043,13 +8489,13 @@ async function startServer() {
           format: probe.detectedFormat,
           isDirect: false,
           embedUrl: classified.originalUrl,
-          error: 'A fonte não devolveu um formato de vídeo compatível.',
+          error: probe.message || 'A fonte não devolveu um formato de vídeo compatível.',
           diagnostics: probe.diagnostics
         });
       }
 
+      const httpCode = probe.diagnostics.httpStatus;
       if (probe.status === 'offline') {
-        const httpCode = probe.diagnostics.httpStatus;
         return res.json({
           success: false,
           status: 'offline',
@@ -5057,35 +8503,24 @@ async function startServer() {
           format: probe.detectedFormat,
           isDirect: false,
           embedUrl: classified.originalUrl,
-          error: (httpCode === 401 || httpCode === 403)
-            ? 'O servidor recusou o acesso.'
-            : (probe.message || 'Não foi possível carregar esta fonte.'),
+          error:
+            httpCode === 401 || httpCode === 403
+              ? 'O servidor recusou o acesso.'
+              : probe.message || 'Conteúdo indisponível no servidor de origem.',
           diagnostics: probe.diagnostics
-        });
-      }
-
-      if (format === 'mp4' || format === 'm3u8' || format === 'hls' || format === 'dash' || format === 'webm') {
-        return res.json({
-          success: true,
-          provider: 'Fonte Externa (Validação pendente)',
-          sourceKind: probe.sourceKind,
-          format,
-          isDirect: true,
-          directUrl: classified.originalUrl,
-          embedUrl: classified.originalUrl,
-          diagnostics: probe.diagnostics,
-          note: probe.message
         });
       }
 
       return res.json({
         success: false,
-        status: probe.status,
+        status: probe.status || 'unverifiable',
         sourceKind: probe.sourceKind,
         format: probe.detectedFormat,
         isDirect: false,
         embedUrl: classified.originalUrl,
-        error: probe.message || 'Não foi possível carregar esta fonte. Verifica o endereço ou adiciona outra fonte.',
+        error:
+          probe.message ||
+          'Não foi possível confirmar um stream de vídeo reproduzível para esta fonte.',
         diagnostics: probe.diagnostics
       });
     } catch (err: any) {
@@ -5164,6 +8599,7 @@ async function startServer() {
 
   // Dynamic Content-Security-Policy frame-ancestors enforcement for Embed / Official Player routes
   app.use(['/player', '/player/*', '/embed', '/embed/*'], (req: Request, res: Response, next: any) => {
+    res.removeHeader('X-Frame-Options');
     const token = typeof req.query.token === 'string' ? req.query.token.trim() : '';
     const globalCfg = db.getApiGlobalSettings();
     if (token) {
@@ -5171,13 +8607,22 @@ async function startServer() {
       if (verif.valid && verif.payload) {
         const appRecord = db.getDeveloperAppById(verif.payload.appId);
         const domains = appRecord ? appRecord.authorizedDomains : verif.payload.allowedDomains;
-        if (domains && domains.length > 0 && !domains.includes('*')) {
-          const ancestors = domains.flatMap(d => [`https://${d}`, `http://${d}`]);
-          res.setHeader('Content-Security-Policy', `frame-ancestors 'self' ${ancestors.join(' ')}`);
+        if (domains && domains.length > 0) {
+          res.setHeader('Content-Security-Policy', buildCspFrameAncestors(domains));
+        } else {
+          res.setHeader('Content-Security-Policy', 'frame-ancestors * http: https:');
         }
+      } else {
+        // Keep framing allowed so the RONYCINE embed UI can render the friendly 401 error card
+        res.setHeader('Content-Security-Policy', 'frame-ancestors * http: https:');
       }
-    } else if (globalCfg.requireDomainForEmbed) {
-      res.setHeader('Content-Security-Policy', "frame-ancestors 'self'");
+    } else {
+      const registeredDomains = getAllRegisteredAuthorizedDomains();
+      if (globalCfg.requireDomainForEmbed && registeredDomains.length > 0) {
+        res.setHeader('Content-Security-Policy', buildCspFrameAncestors(registeredDomains));
+      } else {
+        res.setHeader('Content-Security-Policy', 'frame-ancestors * http: https:');
+      }
     }
     next();
   });

@@ -127,7 +127,7 @@ class RecoveryService {
 
   // --- Catalog Analysis ---
   public async analyzeCatalog(): Promise<RecoveryIssue[]> {
-    const catalog = db.getCatalog({ limit: 10000 }).items;
+    const catalog = db.getCatalog({ limit: Number.MAX_SAFE_INTEGER }).items;
     const issues: RecoveryIssue[] = [];
     const now = new Date().toISOString();
 
@@ -205,7 +205,7 @@ class RecoveryService {
 
     this.isProcessing = true;
     const startTime = Date.now();
-    const catalog = db.getCatalog({ limit: 10000 }).items;
+    const catalog = db.getCatalog({ limit: Number.MAX_SAFE_INTEGER }).items;
 
     db.addActivityLog('info', '✓ TMDB conectado. Iniciando Restauração Inteligente...');
     db.addActivityLog('info', `✓ Verificando catálogo (${catalog.length} títulos)...`);
@@ -662,7 +662,7 @@ class RecoveryService {
     }
 
     const batchSize = Math.min(100, Math.max(10, options.batchSize || 50));
-    const allCatalog = db.getCatalog({ limit: 10000 }).items;
+    const allCatalog = db.getCatalog({ limit: Number.MAX_SAFE_INTEGER }).items;
 
     let targetItems: MediaItem[] = [];
     if (options.filter === 'movies_only') {

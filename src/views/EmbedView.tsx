@@ -187,6 +187,54 @@ function parseEmbedLocation(): ParsedEmbedRoute {
   };
 }
 
+function detectExternalEmbedOrigin(): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    if (window.self === window.top) return null;
+  } catch {
+    // Cross-origin frame access confirmed
+  }
+  try {
+    const ancestors = (window.location as any).ancestorOrigins;
+    if (ancestors && ancestors.length > 0 && ancestors[0]) {
+      const originUrl = new URL(String(ancestors[0]));
+      if (originUrl.origin !== window.location.origin) {
+        return originUrl.origin;
+      }
+    }
+  } catch {}
+  try {
+    if (document.referrer) {
+      const refUrl = new URL(document.referrer);
+      if (refUrl.origin !== window.location.origin) {
+        return refUrl.origin;
+      }
+    }
+  } catch {}
+  return null;
+}
+
+function postSafeParentMessage(
+  eventType: 'ready' | 'started' | 'error' | 'denied' | 'episodeChanged',
+  detail: Record<string, unknown>,
+  targetOrigin?: string | null
+) {
+  if (typeof window === 'undefined') return;
+  try {
+    if (window.parent && window.parent !== window) {
+      window.parent.postMessage(
+        {
+          source: 'ronycine-embed',
+          type: eventType,
+          ...detail,
+          timestamp: Date.now()
+        },
+        targetOrigin || '*'
+      );
+    }
+  } catch {}
+}
+
 export const EmbedView: React.FC = () => {
   const { watchParams } = useAuth();
   const [loading, setLoading] = useState<boolean>(true);
@@ -198,6 +246,7 @@ export const EmbedView: React.FC = () => {
   const [cinemaMode, setCinemaMode] = useState<boolean>(false);
   const [reloadNonce, setReloadNonce] = useState<number>(0);
   const routeRef = useRef<ParsedEmbedRoute>(parseEmbedLocation());
+  const parentOriginRef = useRef<string | null>(detectExternalEmbedOrigin());
 
   const currentHref =
     typeof window !== 'undefined' ? `${window.location.pathname}${window.location.search}` : '/embed/550';
@@ -205,6 +254,7 @@ export const EmbedView: React.FC = () => {
   useEffect(() => {
     const parsed = parseEmbedLocation();
     routeRef.current = parsed;
+    parentOriginRef.current = detectExternalEmbedOrigin();
 
     setLoading(true);
     setError(null);
@@ -217,6 +267,7 @@ export const EmbedView: React.FC = () => {
       setError(parsed.errorMessage || 'Parâmetros de reprodução inválidos.');
       setErrorCode('INVALID_PARAMS');
       setLoading(false);
+      postSafeParentMessage('error', { code: 'INVALID_PARAMS', message: parsed.errorMessage }, parentOriginRef.current);
       return;
     }
 
@@ -234,7 +285,8 @@ export const EmbedView: React.FC = () => {
         type: parsed.mediaType,
         season: parsed.mediaType === 'tv' ? parsed.season : undefined,
         episode: parsed.mediaType === 'tv' ? parsed.episode : undefined,
-        token: parsed.token
+        token: parsed.token,
+        embedOrigin: parentOriginRef.current
       });
     }
 
@@ -254,28 +306,67 @@ export const EmbedView: React.FC = () => {
           setError(null);
           setErrorCode(null);
           setIsSecurityError(false);
+          postSafeParentMessage(
+            'ready',
+            {
+              tmdbId: parsed.contentId,
+              mediaType: parsed.mediaType,
+              season: parsed.mediaType === 'tv' ? parsed.season : undefined,
+              episode: parsed.mediaType === 'tv' ? parsed.episode : undefined,
+              sourcesCount: list.length
+            },
+            parentOriginRef.current
+          );
         } else {
-          setErrorCode((res as any).code || null);
+          const code = (res as any).code || 'SOURCE_UNAVAILABLE';
+          setErrorCode(code);
           setError(res.message || res.error || 'Este conteúdo ainda não possui uma fonte de reprodução disponível.');
+          postSafeParentMessage(
+            'error',
+            {
+              tmdbId: parsed.contentId,
+              mediaType: parsed.mediaType,
+              season: parsed.mediaType === 'tv' ? parsed.season : undefined,
+              episode: parsed.mediaType === 'tv' ? parsed.episode : undefined,
+              code
+            },
+            parentOriginRef.current
+          );
         }
       })
       .catch((err: any) => {
         if (cancelled) return;
         const msg = err?.message || 'Erro ao carregar o player.';
+        const errCode = err?.code || null;
         const lower = msg.toLowerCase();
         const security =
+          errCode === 'DOMAIN_NOT_AUTHORIZED' ||
+          errCode === 'PLAYBACK_TOKEN_EXPIRED' ||
+          errCode === 'PLAYBACK_TOKEN_INVALID' ||
+          errCode === 'TOKEN_CONTENT_MISMATCH' ||
+          errCode === 'APP_SUSPENDED' ||
           lower.includes('token') ||
           lower.includes('domínio') ||
           lower.includes('autorizado') ||
           lower.includes('suspensa') ||
           lower.includes('expirado');
         setIsSecurityError(security);
-        if (lower.includes('não encontrado') || lower.includes('404')) {
+        if (errCode === 'CONTENT_NOT_FOUND' || err?.status === 404 || lower.includes('não encontrado')) {
           setErrorCode('CONTENT_NOT_FOUND');
           setError('Conteúdo não encontrado na RONYCINE API.');
         } else {
+          if (errCode) setErrorCode(errCode);
           setError(msg);
         }
+        postSafeParentMessage(
+          security ? 'denied' : 'error',
+          {
+            tmdbId: parsed.contentId,
+            mediaType: parsed.mediaType,
+            code: errCode || (security ? 'DOMAIN_NOT_AUTHORIZED' : 'PLAYER_ERROR')
+          },
+          parentOriginRef.current
+        );
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -288,10 +379,21 @@ export const EmbedView: React.FC = () => {
 
   if (loading) {
     return (
-      <div className="w-screen h-[100dvh] bg-[#080808] flex flex-col items-center justify-center text-white space-y-4">
-        <RefreshCw className="w-10 h-10 text-[#E50914] animate-spin" />
-        <span className="text-xs uppercase tracking-widest font-bold text-zinc-400">
-          Inicializando RONYCINE Embed Player...
+      <div className="w-screen h-[100dvh] bg-[#080808] flex flex-col items-center justify-center text-white p-6 text-center relative overflow-hidden">
+        <div className="absolute w-64 h-64 rounded-full bg-[#E50914]/10 blur-3xl pointer-events-none" />
+        <div className="relative flex items-center justify-center mb-5">
+          <div className="w-20 h-20 rounded-full border-2 border-white/10" />
+          <div className="absolute inset-0 w-20 h-20 rounded-full border-[3px] border-[#E50914] border-t-transparent animate-spin shadow-[0_0_24px_rgba(229,9,20,0.45)]" />
+          <span className="absolute text-xs font-black tracking-tighter text-white font-display">RC</span>
+        </div>
+        <span className="text-base sm:text-xl font-black tracking-[0.3em] text-white font-display uppercase mb-1">
+          RONY<span className="text-[#E50914]">CINE</span>
+        </span>
+        <span className="text-[10px] font-black tracking-[0.22em] text-zinc-400 uppercase mb-3">
+          PREPARANDO A SUA EXPERIÊNCIA...
+        </span>
+        <span className="px-4 py-1.5 rounded-xl bg-[#111111] border border-white/10 text-xs font-semibold text-zinc-200">
+          A preparar reprodução...
         </span>
       </div>
     );
@@ -304,8 +406,8 @@ export const EmbedView: React.FC = () => {
 
     return (
       <div className="w-screen h-[100dvh] bg-[#080808] flex flex-col items-center justify-center p-6 text-center text-white">
-        <div className="max-w-md w-full bg-[#111114] border border-white/10 rounded-2xl p-8 flex flex-col items-center shadow-2xl">
-          <div className="w-14 h-14 rounded-2xl bg-[#E50914]/15 border border-[#E50914]/30 flex items-center justify-center mb-4">
+        <div className="max-w-md w-full bg-[#111111] border border-white/10 rounded-2xl p-8 flex flex-col items-center shadow-2xl">
+          <div className="w-14 h-14 rounded-2xl bg-[#E50914]/15 border border-[#E50914]/35 flex items-center justify-center mb-4">
             {isSecurityError ? (
               <ShieldAlert className="w-7 h-7 text-[#E50914]" />
             ) : isNotFound ? (
@@ -315,7 +417,7 @@ export const EmbedView: React.FC = () => {
             )}
           </div>
           <span className="text-[10px] font-black uppercase tracking-[0.25em] text-[#E50914] mb-1.5">
-            RONYCINE DIRECT PLAY • EMBED
+            RONYCINE CINEMA ULTRA • EMBED
           </span>
           <h2 className="text-lg sm:text-xl font-black mb-2 font-display">
             {isSecurityError
@@ -341,7 +443,7 @@ export const EmbedView: React.FC = () => {
             <button
               type="button"
               onClick={() => setReloadNonce((n) => n + 1)}
-              className="px-5 py-2.5 bg-[#E50914] hover:bg-red-700 font-bold text-xs uppercase tracking-wider rounded-lg transition-colors flex items-center gap-2 cursor-pointer"
+              className="min-h-[44px] px-5 py-2.5 bg-[#E50914] hover:bg-red-700 font-bold text-xs uppercase tracking-wider rounded-xl transition-colors flex items-center gap-2 cursor-pointer"
             >
               <RefreshCw className="w-3.5 h-3.5" />
               <span>Tentar Novamente</span>
@@ -377,6 +479,7 @@ export const EmbedView: React.FC = () => {
       >
         <RonycinePlayer
           sources={sources}
+          versionAvailability={resolved.versionAvailability}
           title={displayTitle}
           poster={posterUrl}
           autoplay={true}
@@ -386,6 +489,15 @@ export const EmbedView: React.FC = () => {
           hasNextEpisode={Boolean(resolved.nextEpisode?.available)}
           onNextEpisode={() => {
             if (resolved.nextEpisode?.season && resolved.nextEpisode?.episode && resolved.content?.tmdbId) {
+              postSafeParentMessage(
+                'episodeChanged',
+                {
+                  tmdbId: resolved.content.tmdbId,
+                  season: resolved.nextEpisode.season,
+                  episode: resolved.nextEpisode.episode
+                },
+                parentOriginRef.current
+              );
               if (parsed.mode === 'embed') {
                 const tokenParam = parsed.token ? `?token=${encodeURIComponent(parsed.token)}` : '';
                 window.location.href = `/embed/${resolved.content.tmdbId}/${resolved.nextEpisode.season}/${resolved.nextEpisode.episode}${tokenParam}`;
@@ -396,6 +508,17 @@ export const EmbedView: React.FC = () => {
             }
           }}
           onPlaybackEvent={(status, message, sourceType, sourceUrl) => {
+            postSafeParentMessage(
+              status === 'STARTED' ? 'started' : 'error',
+              {
+                tmdbId: parsed.contentId,
+                mediaType: parsed.mediaType,
+                season: parsed.mediaType === 'tv' ? parsed.season : undefined,
+                episode: parsed.mediaType === 'tv' ? parsed.episode : undefined,
+                sourceType
+              },
+              parentOriginRef.current
+            );
             if (parsed.contentId > 0) {
               api.reportPlayerEvent({
                 contentId: parsed.contentId,
@@ -409,7 +532,6 @@ export const EmbedView: React.FC = () => {
               });
             }
           }}
-          standalone={true}
         />
       </ErrorBoundary>
     </div>

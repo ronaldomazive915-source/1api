@@ -110,6 +110,12 @@ export const Footer: React.FC = () => {
                 </button>
               </li>
               <li>
+                <button type="button" onClick={() => navigateTo('status')} className="text-emerald-400 hover:text-emerald-300 font-semibold transition-colors flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                  <span>Status do Sistema</span>
+                </button>
+              </li>
+              <li>
                 <button type="button" onClick={() => navigateTo('admin')} className="text-zinc-400 hover:text-[#E50914] transition-colors">
                   Painel Administrativo
                 </button>

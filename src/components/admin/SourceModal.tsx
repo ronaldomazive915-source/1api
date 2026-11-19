@@ -26,6 +26,13 @@ import { RonycinePlayer } from '../player/RonycinePlayer.js';
 import { ErrorBoundary } from '../ErrorBoundary.js';
 import { MgebUrlField } from './MgebUrlField.js';
 import { buildMgebUrl, stripMgebPrefix } from '../../lib/mgebUtils.js';
+import {
+  AUDIO_LANGUAGE_OPTIONS,
+  SOURCE_QUALITY_OPTIONS,
+  VERSION_TYPE_OPTIONS,
+  isPresetAudioLanguage,
+  normalizeVersionType
+} from '../../lib/sourceMetadata.js';
 
 interface SourceModalProps {
   isOpen: boolean;
@@ -40,6 +47,7 @@ export const SourceModal: React.FC<SourceModalProps> = ({ isOpen, onClose, onSav
   >({});
   const [savingStatus, setSavingStatus] = useState<'idle' | 'saving' | 'success' | 'error'>('idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [duplicateConflict, setDuplicateConflict] = useState<VideoSource | null>(null);
 
   // Diagnostic Test State
   const [isTestingSource, setIsTestingSource] = useState(false);
@@ -53,6 +61,10 @@ export const SourceModal: React.FC<SourceModalProps> = ({ isOpen, onClose, onSav
 
   // Inline Playback Test State
   const [showTestPlayer, setShowTestPlayer] = useState(false);
+  const [playTestDiag, setPlayTestDiag] = useState<{
+    status: 'playing' | 'confirmed' | 'format_error' | 'connection_error';
+    message: string;
+  }>({ status: 'playing', message: 'A inicializar stream...' });
   const [useMgebPrefix, setUseMgebPrefix] = useState(true);
 
   useEffect(() => {
@@ -65,6 +77,10 @@ export const SourceModal: React.FC<SourceModalProps> = ({ isOpen, onClose, onSav
         serverName: shouldDefaultMgeb ? 'MGEB Endpoint' : 'Servidor Principal',
         format: shouldDefaultMgeb ? 'php_endpoint' : 'embed',
         audioLanguage: 'Português',
+        versionType:
+          normalizeVersionType(initialData.versionType, initialData.serverName, initialData.audioLanguage) || 'dublado',
+        subtitleLanguage: initialData.subtitleLanguage || '',
+        subtitleUrl: initialData.subtitleUrl || '',
         quality: '1080p',
         status: 'registered',
         isPrimary: false,
@@ -79,6 +95,9 @@ export const SourceModal: React.FC<SourceModalProps> = ({ isOpen, onClose, onSav
       setCurrentSource({
         contentType: 'movie',
         audioLanguage: 'Português',
+        versionType: 'dublado',
+        subtitleLanguage: '',
+        subtitleUrl: '',
         quality: '1080p',
         status: 'registered',
         format: 'php_endpoint',
@@ -151,7 +170,7 @@ export const SourceModal: React.FC<SourceModalProps> = ({ isOpen, onClose, onSav
     }
   };
 
-  const handleSaveSource = async (keepOpen = false) => {
+  const handleSaveSource = async (keepOpen = false, replaceExisting = false) => {
     const cleanUrl = (currentSource.url || '').trim();
     if (!currentSource.contentId || !cleanUrl || !currentSource.serverName?.trim()) {
       setErrorMessage('Preencha os campos obrigatórios (TMDB ID, URL da Fonte e Nome do Servidor).');
@@ -175,15 +194,17 @@ export const SourceModal: React.FC<SourceModalProps> = ({ isOpen, onClose, onSav
 
     setSavingStatus('saving');
     setErrorMessage(null);
+    setDuplicateConflict(null);
 
-    const payload: Partial<VideoSource> = {
+    const payload: Partial<VideoSource> & { replaceExisting?: boolean } = {
       ...currentSource,
       url: classified.originalUrl,
       originalUrl: classified.originalUrl,
       sourceKind: currentSource.sourceKind || classified.sourceKind,
       format: currentSource.format || classified.suggestedFormat,
       status: currentSource.status || 'registered',
-      diagnostics: currentSource.diagnostics || classified.diagnostics
+      diagnostics: currentSource.diagnostics || classified.diagnostics,
+      ...(replaceExisting ? { replaceExisting: true } : {})
     };
 
     try {
@@ -194,6 +215,7 @@ export const SourceModal: React.FC<SourceModalProps> = ({ isOpen, onClose, onSav
       }
 
       setSavingStatus('success');
+      setDuplicateConflict(null);
       onSave();
 
       if (keepOpen) {
@@ -220,8 +242,20 @@ export const SourceModal: React.FC<SourceModalProps> = ({ isOpen, onClose, onSav
         }, 900);
       }
     } catch (err: any) {
-      console.error('Failed to save source:', err);
-      setErrorMessage(err.message || 'Erro ao salvar fonte.');
+      const isDuplicate =
+        err?.code === 'DUPLICATE_SOURCE' ||
+        err?.status === 409 ||
+        String(err?.message || '').includes('Já existe uma fonte igual');
+      if (isDuplicate) {
+        setDuplicateConflict(err?.existingSource || ({} as VideoSource));
+        setErrorMessage(
+          err?.existingSource?.serverName
+            ? `Esta URL já está registada no servidor "${err.existingSource.serverName}". Clique em "Substituir Fonte Existente" para atualizar.`
+            : err?.message || 'Já existe uma fonte igual registada para este conteúdo.'
+        );
+      } else {
+        setErrorMessage(err?.message || 'Erro ao salvar fonte.');
+      }
       setSavingStatus('error');
     }
   };
@@ -354,11 +388,12 @@ export const SourceModal: React.FC<SourceModalProps> = ({ isOpen, onClose, onSav
                       </label>
                       <input
                         type="number"
-                        min={1}
-                        value={currentSource.seasonNumber || 1}
-                        onChange={(e) =>
-                          setCurrentSource({ ...currentSource, seasonNumber: Math.max(1, parseInt(e.target.value, 10) || 1) })
-                        }
+                        min={0}
+                        value={currentSource.seasonNumber ?? 1}
+                        onChange={(e) => {
+                          const parsed = parseInt(e.target.value, 10);
+                          setCurrentSource({ ...currentSource, seasonNumber: Math.max(0, isNaN(parsed) ? 1 : parsed) });
+                        }}
                         className="w-full bg-black border border-white/10 rounded-2xl px-4 py-3 text-sm text-white focus:border-brand outline-none"
                         required
                       />
@@ -419,12 +454,78 @@ export const SourceModal: React.FC<SourceModalProps> = ({ isOpen, onClose, onSav
                   <label className="text-[10px] font-black uppercase tracking-widest text-zinc-400">
                     Idioma do Áudio
                   </label>
+                  <select
+                    value={
+                      isPresetAudioLanguage(currentSource.audioLanguage)
+                        ? currentSource.audioLanguage || 'Português'
+                        : 'Outro'
+                    }
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setCurrentSource({
+                        ...currentSource,
+                        audioLanguage: val === 'Outro' ? '' : val
+                      });
+                    }}
+                    className="w-full bg-black border border-white/10 rounded-2xl px-4 py-3 text-sm text-white focus:border-brand outline-none font-bold"
+                  >
+                    {AUDIO_LANGUAGE_OPTIONS.map((lang) => (
+                      <option key={lang} value={lang}>
+                        {lang}
+                      </option>
+                    ))}
+                  </select>
+                  {!isPresetAudioLanguage(currentSource.audioLanguage) && (
+                    <input
+                      type="text"
+                      value={currentSource.audioLanguage || ''}
+                      onChange={(e) => setCurrentSource({ ...currentSource, audioLanguage: e.target.value })}
+                      className="w-full bg-black border border-white/10 rounded-2xl px-4 py-2.5 text-sm text-white focus:border-brand outline-none mt-2"
+                      placeholder="Digite o idioma (ex: Japonês, Coreano...)"
+                    />
+                  )}
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black uppercase tracking-widest text-zinc-400">
+                    Tipo de Versão
+                  </label>
+                  <select
+                    value={currentSource.versionType || 'dublado'}
+                    onChange={(e) => setCurrentSource({ ...currentSource, versionType: e.target.value })}
+                    className="w-full bg-black border border-white/10 rounded-2xl px-4 py-3 text-sm text-white focus:border-brand outline-none font-bold"
+                  >
+                    {VERSION_TYPE_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black uppercase tracking-widest text-zinc-400">
+                    Link da Legenda Externa (.srt / .vtt) — Opcional
+                  </label>
+                  <input
+                    type="url"
+                    value={currentSource.subtitleUrl || ''}
+                    onChange={(e) => setCurrentSource({ ...currentSource, subtitleUrl: e.target.value })}
+                    className="w-full bg-black border border-white/10 rounded-2xl px-4 py-3 text-sm text-white focus:border-brand outline-none font-mono"
+                    placeholder="https://exemplo.com/legenda.vtt ou .srt"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black uppercase tracking-widest text-zinc-400">
+                    Idioma da Legenda — Opcional
+                  </label>
                   <input
                     type="text"
-                    value={currentSource.audioLanguage || 'Português'}
-                    onChange={(e) => setCurrentSource({ ...currentSource, audioLanguage: e.target.value })}
+                    value={currentSource.subtitleLanguage || ''}
+                    onChange={(e) => setCurrentSource({ ...currentSource, subtitleLanguage: e.target.value })}
                     className="w-full bg-black border border-white/10 rounded-2xl px-4 py-3 text-sm text-white focus:border-brand outline-none"
-                    placeholder="Ex: Português, Dublado, Legendado"
+                    placeholder="Ex: Português, Inglês, Espanhol"
                   />
                 </div>
 
@@ -437,11 +538,21 @@ export const SourceModal: React.FC<SourceModalProps> = ({ isOpen, onClose, onSav
                     onChange={(e) => setCurrentSource({ ...currentSource, quality: e.target.value })}
                     className="w-full bg-black border border-white/10 rounded-2xl px-4 py-3 text-sm text-white focus:border-brand outline-none font-bold"
                   >
-                    <option value="Automática">Automática / Adaptação HLS</option>
-                    <option value="4K">4K Ultra HD</option>
-                    <option value="1080p">1080p Full HD</option>
-                    <option value="720p">720p HD</option>
-                    <option value="480p">480p SD</option>
+                    {SOURCE_QUALITY_OPTIONS.map((q) => (
+                      <option key={q} value={q}>
+                        {q === 'Automática'
+                          ? 'Automática / Desconhecida'
+                          : q === '4K'
+                            ? '4K (2160p Ultra HD)'
+                            : q === '1440p'
+                              ? '1440p (2K QHD)'
+                              : q === '1080p'
+                                ? '1080p (Full HD)'
+                                : q === '720p'
+                                  ? '720p (HD)'
+                                  : q}
+                      </option>
+                    ))}
                   </select>
                 </div>
               </div>
@@ -504,7 +615,15 @@ export const SourceModal: React.FC<SourceModalProps> = ({ isOpen, onClose, onSav
                 onToggleMgebPrefix={setUseMgebPrefix}
                 onChangeUrl={(finalUrl) => handleUrlChange(finalUrl)}
                 onTestSource={handleTestSource}
-                onTogglePlayTest={() => setShowTestPlayer(prev => !prev)}
+                onTogglePlayTest={() => {
+                  setShowTestPlayer(prev => {
+                    const next = !prev;
+                    if (next) {
+                      setPlayTestDiag({ status: 'playing', message: 'A inicializar stream...' });
+                    }
+                    return next;
+                  });
+                }}
                 isTesting={isTestingSource}
                 showPlayTest={showTestPlayer}
                 helperText="O prefixo MGEB é combinado automaticamente sem duplicação. Se colar um endereço já completo com https://mgeb.space/mp4.php?url=..., o sistema reconhece e evita duplicar."
@@ -599,33 +718,89 @@ export const SourceModal: React.FC<SourceModalProps> = ({ isOpen, onClose, onSav
 
               {/* Inline Test Player */}
               {showTestPlayer && currentSource.url && (
-                <div className="rounded-2xl overflow-hidden border border-white/15 bg-black aspect-video">
-                  <ErrorBoundary fallbackTitle="Erro ao testar reprodução" resetKey={currentSource.url}>
-                    <RonycinePlayer
-                      sources={[
-                        {
-                          id: currentSource.id || 'test-preview',
-                          url: currentSource.url,
-                          originalUrl: currentSource.originalUrl || currentSource.url,
-                          format: currentSource.format,
-                          sourceKind: currentSource.sourceKind,
-                          serverName: currentSource.serverName || 'Teste Admin',
-                          audioLanguage: currentSource.audioLanguage,
-                          quality: currentSource.quality,
-                          isPrimary: true
-                        }
-                      ]}
-                      title={`Teste: ${currentSource.selectedTitle || currentSource.serverName || 'Fonte'}`}
-                      autoplay={true}
-                    />
-                  </ErrorBoundary>
+                <div className="rounded-2xl overflow-hidden border border-white/15 bg-black">
+                  <div className="px-4 py-2.5 border-b border-white/10 bg-[#111111] flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-[11px] font-bold text-zinc-300 truncate max-w-md">
+                      {playTestDiag.message}
+                    </span>
+                    <span
+                      className={`px-2 py-0.5 rounded text-[10px] font-black uppercase ${
+                        playTestDiag.status === 'confirmed'
+                          ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                          : playTestDiag.status === 'format_error' || playTestDiag.status === 'connection_error'
+                            ? 'bg-red-500/20 text-red-300 border border-[#E50914]/40'
+                            : 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+                      }`}
+                    >
+                      {playTestDiag.status === 'confirmed'
+                        ? 'REPRODUÇÃO CONFIRMADA'
+                        : playTestDiag.status === 'format_error'
+                          ? 'ERRO DE FORMATO'
+                          : playTestDiag.status === 'connection_error'
+                            ? 'ERRO DE CONEXÃO'
+                            : 'TESTE EM ANDAMENTO'}
+                    </span>
+                  </div>
+                  <div className="aspect-video bg-black">
+                    <ErrorBoundary fallbackTitle="Erro ao testar reprodução" resetKey={currentSource.url}>
+                      <RonycinePlayer
+                        sources={[
+                          {
+                            id: currentSource.id || 'test-preview',
+                            url: currentSource.url,
+                            originalUrl: currentSource.originalUrl || currentSource.url,
+                            format: currentSource.format || classifySourceUrl(currentSource.url).suggestedFormat,
+                            sourceKind: currentSource.sourceKind || classifySourceUrl(currentSource.url).sourceKind,
+                            serverName: currentSource.serverName || 'Teste Admin',
+                            audioLanguage: currentSource.audioLanguage,
+                            versionType: currentSource.versionType,
+                            subtitleUrl: currentSource.subtitleUrl,
+                            subtitleLanguage: currentSource.subtitleLanguage,
+                            quality: currentSource.quality,
+                            diagnostics: currentSource.diagnostics,
+                            isPrimary: true
+                          }
+                        ]}
+                        title={`Teste: ${currentSource.selectedTitle || currentSource.serverName || 'Fonte'}`}
+                        autoplay={true}
+                        onPlaybackEvent={(status, message) => {
+                          if (status === 'STARTED') {
+                            setPlayTestDiag({
+                              status: 'confirmed',
+                              message: 'Reprodução inicializada no navegador.'
+                            });
+                          } else {
+                            const lower = (message || '').toLowerCase();
+                            setPlayTestDiag({
+                              status:
+                                lower.includes('formato') || lower.includes('descodificar') || lower.includes('html')
+                                  ? 'format_error'
+                                  : 'connection_error',
+                              message: message || 'Erro ao reproduzir esta fonte.'
+                            });
+                          }
+                        }}
+                      />
+                    </ErrorBoundary>
+                  </div>
                 </div>
               )}
 
               {savingStatus === 'error' && errorMessage && (
-                <div className="p-3.5 bg-brand/10 border border-brand/30 rounded-xl text-brand text-xs font-bold flex items-center gap-2">
-                  <AlertTriangle className="w-4 h-4 shrink-0" />
-                  <span>{errorMessage}</span>
+                <div className="p-3.5 bg-brand/10 border border-brand/30 rounded-xl text-brand text-xs font-bold flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 shrink-0" />
+                    <span>{errorMessage}</span>
+                  </div>
+                  {duplicateConflict && !currentSource?.id && (
+                    <button
+                      type="button"
+                      onClick={() => handleSaveSource(false, true)}
+                      className="px-3.5 py-2 min-h-[40px] bg-brand hover:bg-brand/90 text-white text-[11px] font-black uppercase tracking-wider rounded-lg shrink-0 transition-all"
+                    >
+                      Substituir Fonte Existente
+                    </button>
+                  )}
                 </div>
               )}
 

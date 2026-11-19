@@ -46,6 +46,37 @@ export type RecommendedPlaybackMode =
   | 'unsupported'
   | 'unknown';
 
+export type SourceVersionType =
+  | 'Dublado'
+  | 'Legendado'
+  | 'Original'
+  | 'Multiáudio'
+  | 'Outra versão'
+  | 'dublado'
+  | 'legendado'
+  | 'original'
+  | 'multiaudio'
+  | 'outra';
+
+export type VersionAvailabilityStatus = 'available' | 'not_registered' | 'unavailable';
+
+export interface VersionSlotAvailability {
+  version: 'dublado' | 'legendado';
+  status: VersionAvailabilityStatus;
+  registeredCount: number;
+  validCount: number;
+  sourceId?: string;
+  label?: string;
+  format?: string;
+  reason?: string;
+}
+
+export interface PlaybackVersionAvailability {
+  dublado: VersionSlotAvailability;
+  legendado: VersionSlotAvailability;
+  untypedCount?: number;
+}
+
 export interface SourceDiagnostics {
   domain?: string;
   endpointPath?: string;
@@ -66,6 +97,14 @@ export interface SourceDiagnostics {
   failureReason?: string | null;
   corsNote?: string | null;
   testedAt?: string;
+  maxDetectedResolution?: string;
+  availableQualities?: string[];
+  analysisStatus?: string;
+  detailKind?: string;
+  providerName?: string;
+  diagnosticSteps?: Array<{ step: string; status: 'ok' | 'error' | 'warn' | 'info'; detail?: string }>;
+  externalPageUrl?: string;
+  verificationLabel?: string;
 }
 
 export interface User {
@@ -74,7 +113,37 @@ export interface User {
   email: string;
   avatar?: string;
   role: 'admin' | 'user' | 'founder';
+  status?: 'active' | 'suspended' | 'blocked' | 'banned';
+  adsDistributionEnabled?: boolean;
+  suspensionReason?: string;
+  suspensionExpiresAt?: string;
+  lastLogin?: string;
+  lastHeartbeatAt?: string;
   createdAt: string;
+}
+
+export interface AdCampaign {
+  id: string;
+  name: string;
+  type: 'popunder' | 'banner' | 'banner_responsive' | 'video_preroll' | 'external_code' | 'url_link';
+  displayLocation: string[]; // e.g. ['global', 'home', 'detail', 'movies', 'series', 'player', 'player_before', 'player_inside', 'player_after']
+  codeOrLink: string;
+  status: 'ACTIVE' | 'DISABLED' | 'SCHEDULED' | 'EXPIRED' | 'REVIEW' | 'ERROR';
+  frequency: {
+    minIntervalMinutes?: number;
+    maxPerSession?: number;
+    maxPerUser?: number;
+  };
+  startDate: string;
+  endDate?: string;
+  allowedDevices: string[]; // ['desktop', 'tablet', 'mobile']
+  priority: number;
+  description?: string;
+  impressions: number;
+  clicks: number;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface MediaSourceSummary {
@@ -123,6 +192,10 @@ export interface MediaItem {
   releaseYear?: number;
   releaseDate?: string;
   genres?: string[];
+  categories?: string[]; // e.g. ['anime'], ['dorama']
+  popularity?: number;
+  originCountry?: string[];
+  originalLanguage?: string;
   duration?: number; // in minutes
   numberOfSeasons?: number;
   numberOfEpisodes?: number;
@@ -150,6 +223,8 @@ export interface MediaItem {
   cast?: any[];
   director?: string;
   source?: string;
+  hasPlayableSource?: boolean;
+  inCatalog?: boolean;
   sourceSummary?: MediaSourceSummary;
   diagnosticSummary?: MediaDiagnosticSummary;
 }
@@ -167,6 +242,7 @@ export interface Season {
 
 export interface Episode {
   id?: string;
+  tmdbId?: number;
   episodeNumber: number;
   seasonNumber: number;
   title: string;
@@ -175,6 +251,11 @@ export interface Episode {
   duration?: number;
   airDate?: string;
   voteAverage?: number;
+  link?: string;
+  sourcesCount?: number;
+  sourceStatus?: string;
+  sources?: PlayerSource[];
+  extraMetadata?: Record<string, any>;
 }
 
 export interface PlayerSource {
@@ -192,6 +273,9 @@ export interface PlayerSource {
   label?: string;
   quality?: string;
   audioLanguage?: string;
+  subtitleLanguage?: string;
+  versionType?: SourceVersionType | string;
+  subtitleUrl?: string;
   isPrimary?: boolean;
   priority?: number;
   enabled?: boolean;
@@ -211,6 +295,9 @@ export interface PlayerResolvedSource {
   label?: string;
   quality?: string;
   audioLanguage?: string;
+  subtitleLanguage?: string;
+  versionType?: SourceVersionType | string;
+  subtitleUrl?: string;
   isPrimary?: boolean;
   priority?: number;
   enabled?: boolean;
@@ -238,6 +325,7 @@ export interface PlayerResolveResponse {
   source: PlayerResolvedSource | null;
   sources?: PlayerResolvedSource[];
   alternativeSources?: PlayerResolvedSource[];
+  versionAvailability?: PlaybackVersionAvailability;
   nextEpisode?: {
     available: boolean;
     season?: number;
@@ -303,6 +391,10 @@ export interface CatalogStats {
   totalSeries: number;
   totalSeasons: number;
   totalEpisodes: number;
+  totalAnimes?: number;
+  totalDoramas?: number;
+  publishedAnimes?: number;
+  publishedDoramas?: number;
   totalUsers: number;
   totalViews: number;
   publishedMovies?: number;
@@ -314,6 +406,13 @@ export interface CatalogStats {
   deletedMovies?: number;
   deletedSeries?: number;
   totalProblematic?: number;
+  metadataAlertsCount?: number;
+  metadataAlerts?: {
+    missingPoster: number;
+    incompleteInfo: number;
+    invalidTmdb: number;
+    missingSource: number;
+  };
   top10Count?: number;
   totalLinks?: number;
   onlineLinks?: number;
@@ -324,6 +423,7 @@ export interface CatalogStats {
     tmdbId?: number;
     title: string;
     type: 'movie' | 'tv';
+    categories?: string[];
     posterPath?: string;
     releaseYear?: number;
     voteAverage?: number;
@@ -538,6 +638,7 @@ export interface WatchProgress {
   progressPercent: number;
   durationSeconds: number;
   positionSeconds: number;
+  completed?: boolean;
   updatedAt: string;
 }
 
@@ -560,6 +661,8 @@ export interface VideoSource {
   format: 'mp4' | 'm3u8' | 'hls' | 'dash' | 'mpd' | 'webm' | 'embed' | 'iframe' | 'php_endpoint' | 'html' | 'external' | string;
   audioLanguage?: string;
   subtitleLanguage?: string;
+  versionType?: SourceVersionType | string;
+  subtitleUrl?: string;
   quality?: string;
   status: SourceStatus | string;
   createdAt: string;
@@ -668,9 +771,25 @@ export interface DeveloperApp {
   description: string;
   status: 'ACTIVE' | 'SUSPENDED';
   plan: PlanTier;
+  apiType: 'standard' | 'special';
+  specialRequestStatus?: 'none' | 'pending' | 'approved' | 'rejected' | 'suspended';
+  adsEnabled?: boolean;
   authorizedDomains: string[];
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ConnectedSiteRecord {
+  appId: string;
+  appName: string;
+  domain: string;
+  developerEmail: string;
+  plan: PlanTier;
+  apiType: 'standard' | 'special';
+  adsEnabled: boolean;
+  totalSessions: number;
+  lastActivityAt: string;
+  status: 'active' | 'inactive';
 }
 
 export interface ApiKeyRecord {
@@ -681,7 +800,7 @@ export interface ApiKeyRecord {
   name: string;
   keyPrefix: string;
   keyHash: string;
-  status: 'ACTIVE' | 'REVOKED';
+  status: 'ACTIVE' | 'REVOKED' | 'SUSPENDED' | 'DISABLED';
   lastUsedAt?: string | null;
   createdAt: string;
   revokedAt?: string | null;
@@ -751,6 +870,9 @@ export interface SeasonSourceTemplate {
   serverName?: string;
   format?: string;
   audioLanguage?: string;
+  subtitleLanguage?: string;
+  versionType?: SourceVersionType | string;
+  subtitleUrl?: string;
   quality?: string;
   updatedAt: string;
 }
@@ -767,3 +889,616 @@ export interface BatchEpisodeSourcesResult {
   savedSources: VideoSource[];
   message: string;
 }
+
+// --- UNLIMITED SERIES COMPARISON & PROGRESSIVE SYNC ---
+
+export interface SeasonComparisonStats {
+  seasonNumber: number;
+  name: string;
+  isSpecial: boolean;
+  expectedEpisodes: number;
+  foundEpisodes: number;
+  withLink: number;
+  withoutLink: number;
+  validatedCount: number;
+  errorCount: number;
+  pendingCount: number;
+  difference: number;
+  status: 'COMPLETE' | 'PARTIAL' | 'NO_LINKS' | 'MISSING_TMDB_DATA';
+}
+
+export interface SeriesComparisonReport {
+  tmdbId: number;
+  mediaId?: string;
+  title: string;
+  officialSeasonsCount: number;
+  localSeasonsCount: number;
+  expectedEpisodes: number;
+  foundEpisodes: number;
+  withLink: number;
+  withoutLink: number;
+  validatedCount: number;
+  errorCount: number;
+  difference: number;
+  seasons: SeasonComparisonStats[];
+  generatedAt: string;
+}
+
+export interface SeriesSyncJob {
+  jobId: string;
+  tmdbId: number;
+  title?: string;
+  status: 'RUNNING' | 'COMPLETED' | 'CANCELLED' | 'ERROR';
+  totalSeasons: number;
+  processedSeasons: number;
+  totalEpisodesFound: number;
+  currentSeasonNumber?: number | null;
+  lastError?: string | null;
+  startedAt: string;
+  completedAt?: string | null;
+}
+
+// --- BACKUP CENTER PRO MAX ---
+
+export type BackupExportMode = 'full' | 'catalog';
+export type BackupFormat = 'zip' | 'json' | 'csv' | 'xlsx';
+export type BackupConflictMode =
+  | 'skip'
+  | 'update_metadata_keep_links'
+  | 'merge_new_links'
+  | 'overwrite';
+export type BackupImportFilter = 'all' | 'movies' | 'series';
+
+export interface BackupRecord {
+  id: string;
+  filename: string;
+  format: BackupFormat;
+  mode: BackupExportMode;
+  mimeType: string;
+  sizeBytes: number;
+  createdAt: string;
+  createdBy: string;
+  origin: 'manual' | 'auto' | 'pre_import_rollback' | 'legacy';
+  counts: {
+    movies: number;
+    series: number;
+    seasons: number;
+    episodes: number;
+    sources: number;
+  };
+  filePath?: string;
+  inlineLegacy?: boolean;
+}
+
+export interface BackupImportPreview {
+  uploadToken: string;
+  filename: string;
+  detectedFormat: BackupFormat;
+  detectedMode: BackupExportMode | 'mixed';
+  sizeBytes: number;
+  summary: {
+    moviesTotal: number;
+    seriesTotal: number;
+    seasonsTotal: number;
+    episodesTotal: number;
+    sourcesTotal: number;
+    newMovies: number;
+    existingMovies: number;
+    newSeries: number;
+    existingSeries: number;
+    newSources: number;
+    duplicateSources: number;
+    invalidRows: number;
+  };
+  detectedColumns: string[];
+  warnings: string[];
+  errors: string[];
+  sampleItems: Array<{
+    type: 'movie' | 'tv';
+    tmdbId?: number;
+    title: string;
+    seasonNumber?: number;
+    episodeNumber?: number;
+    linksCount: number;
+    existsInCatalog: boolean;
+  }>;
+}
+
+export interface BackupImportJob {
+  jobId: string;
+  status: 'PENDING' | 'RUNNING' | 'COMPLETED' | 'CANCELLED' | 'ERROR' | 'ROLLED_BACK';
+  filename: string;
+  format: BackupFormat;
+  filter: BackupImportFilter;
+  conflictMode: BackupConflictMode;
+  rollbackBackupId?: string | null;
+  totalOperations: number;
+  processedOperations: number;
+  importedMovies: number;
+  updatedMovies: number;
+  importedSeries: number;
+  updatedSeries: number;
+  importedEpisodes: number;
+  importedSources: number;
+  skippedCount: number;
+  errorCount: number;
+  recentErrors: string[];
+  currentStep: string;
+  startedAt: string;
+  completedAt?: string | null;
+}
+
+export interface BackupSystemStatus {
+  totalMovies: number;
+  totalSeries: number;
+  totalSeasons: number;
+  totalEpisodes: number;
+  totalSources: number;
+  storeSizeBytes: number;
+  backupsDirSizeBytes: number;
+  backupsCount: number;
+  lastBackupAt: string | null;
+  lastImportAt: string | null;
+  autoBackupEnabled: boolean;
+  autoBackupIntervalHours: number;
+  serverTime: string;
+}
+
+// --- SMART DASHBOARD, CATEGORIZATION & TRENDING ---
+
+export interface SmartDetectionCandidate {
+  tmdbId: number;
+  type: 'movie' | 'tv';
+  title: string;
+  originalTitle?: string;
+  posterPath?: string;
+  backdropPath?: string;
+  releaseYear?: number;
+  releaseDate?: string;
+  firstAirDate?: string;
+  voteAverage?: number;
+  popularity?: number;
+  genres?: string[];
+  originCountry?: string[];
+  originalLanguage?: string;
+  overview?: string;
+  numberOfSeasons?: number;
+  numberOfEpisodes?: number;
+  existsInCatalog: boolean;
+  existingMediaId?: string | null;
+  detection: {
+    suggestedType: 'movie' | 'tv';
+    suggestedCategories: Array<'anime' | 'dorama'>;
+    confidence: 'high' | 'medium' | 'low';
+    needsManualChoice: boolean;
+    originCountry: string[];
+    originalLanguage?: string;
+    reasons: string[];
+  };
+}
+
+export interface PublicStatsResponse {
+  success: boolean;
+  moviesCount: number;
+  seriesCount: number;
+  episodesCount: number;
+  animesCount: number;
+  doramasCount: number;
+  totalCatalog: number;
+  movies?: number;
+  series?: number;
+  links?: number;
+  status: 'Online' | 'Offline' | 'Maintenance' | string;
+  updatedAt?: string;
+}
+
+export interface SystemServiceStatus {
+  name: string;
+  key: string;
+  status: 'ONLINE' | 'DEGRADED' | 'OFFLINE';
+  latencyMs?: number;
+  message?: string;
+}
+
+export interface SystemStatusReport {
+  overallStatus: 'HEALTHY' | 'WARNING' | 'CRITICAL';
+  uptimeSeconds: number;
+  services: SystemServiceStatus[];
+  database: {
+    totalMovies: number;
+    totalSeries: number;
+    totalSources: number;
+    sizeBytes: number;
+  };
+}
+
+export interface ConnectionAnalyticsSummary {
+  totalRequests: number;
+  successRate: number;
+  averageLatencyMs: number;
+  activeEndpoints: number;
+}
+
+export type LinkHealthStatus = 'online' | 'offline' | 'unverified' | 'degraded';
+
+export interface SourceVerificationRecord {
+  id: string;
+  url: string;
+  status: LinkHealthStatus;
+  latencyMs: number;
+  lastCheckedAt: string;
+  errorMessage?: string;
+}
+
+export interface ServerAlert {
+  id: string;
+  title?: string;
+  severity: 'low' | 'medium' | 'high';
+  message: string;
+  createdAt: string;
+  timestamp?: string;
+  acknowledged: boolean;
+}
+
+export interface ServerSettings {
+  autoVerifyEnabled: boolean;
+  verifyIntervalHours: number;
+  maxConcurrentVerifications: number;
+  notificationsEnabled: boolean;
+}
+
+export interface TrendingSectionResponse {
+  success: boolean;
+  tab: 'trending' | 'movies' | 'series' | 'animes' | 'doramas' | 'recent';
+  heroSpotlight: MediaItem | null;
+  libraryItems: MediaItem[];
+  tmdbGlobalItems: MediaItem[];
+  recentAdditions: MediaItem[];
+  popularLibrary: MediaItem[];
+  stats: PublicStatsResponse;
+  tmdbOnline: boolean;
+  updatedAt: string;
+}
+
+// --- SMART SEEKEE / EXTERNAL LINK IMPORTER ---
+
+export interface LinkImportExtractedEpisodeLink {
+  seasonNumber: number;
+  episodeNumber: number;
+  pageUrl: string;
+  label?: string;
+}
+
+export interface LinkImportEpisodePreview {
+  seasonNumber: number;
+  episodeNumber: number;
+  title: string;
+  overview?: string;
+  duration?: number;
+  airDate?: string;
+  stillPath?: string;
+  voteAverage?: number;
+  hasSourcePageLink: boolean;
+  sourcePageUrl?: string | null;
+  existsInCatalog?: boolean;
+}
+
+export interface LinkImportSeasonPreview {
+  seasonNumber: number;
+  name: string;
+  overview?: string;
+  posterPath?: string;
+  tmdbEpisodeCount: number;
+  sourceLinksCount: number;
+  existingEpisodesCount: number;
+  episodes: LinkImportEpisodePreview[];
+}
+
+export interface LinkImportTmdbCandidate {
+  tmdbId: number;
+  type: 'movie' | 'tv';
+  title: string;
+  originalTitle?: string;
+  overview?: string;
+  posterPath?: string;
+  backdropPath?: string;
+  releaseYear?: number;
+  releaseDate?: string;
+  firstAirDate?: string;
+  voteAverage?: number;
+  popularity?: number;
+  genres?: string[];
+  originCountry?: string[];
+  originalLanguage?: string;
+  numberOfSeasons?: number;
+  numberOfEpisodes?: number;
+  suggestedCategories?: Array<'anime' | 'dorama'>;
+  confidence: 'high' | 'medium' | 'low';
+  score: number;
+  matchReasons: string[];
+  existsInCatalog: boolean;
+  existingMediaId?: string | null;
+  existingSeasonsCount?: number;
+  existingEpisodesCount?: number;
+}
+
+export interface LinkImportAnalysisResult {
+  inputUrl: string;
+  normalizedUrl: string;
+  domain: string;
+  status: 'READY' | 'DUPLICATE' | 'LOW_CONFIDENCE' | 'NOT_FOUND' | 'UNAVAILABLE' | 'INVALID_URL';
+  pageAccess: {
+    accessible: boolean;
+    httpStatus: number | null;
+    contentType: string | null;
+    finalUrl: string | null;
+    protectionDetected: boolean;
+    protectionType?: 'cloudflare' | 'captcha' | 'auth' | 'paywall' | 'forbidden' | null;
+    diagnosticMessage: string;
+    isHtmlPageOnly: boolean;
+  };
+  extracted: {
+    rawPageTitle?: string;
+    ogTitle?: string;
+    ogDescription?: string;
+    ogImage?: string;
+    ogType?: string;
+    cleanedTitle: string;
+    alternativeQueries: string[];
+    year?: number;
+    inferredType: 'movie' | 'tv' | 'unknown';
+    hintedEpisodeNumber?: number;
+    hintedSeasonNumber?: number;
+    languageHint?: string;
+    jsonLdFound: boolean;
+    detectedEpisodeLinks: LinkImportExtractedEpisodeLink[];
+    unidentifiedFields: string[];
+  };
+  candidates: LinkImportTmdbCandidate[];
+  selectedCandidate: LinkImportTmdbCandidate | null;
+  seasonsPreview: LinkImportSeasonPreview[];
+  tmdbTotalSeasons: number;
+  tmdbTotalEpisodes: number;
+  sourceEpisodeLinksFound: number;
+  duplicateCheck: {
+    isDuplicate: boolean;
+    existingMediaId?: string | null;
+    existingTitle?: string | null;
+    existingSeasonsCount: number;
+    existingEpisodesCount: number;
+    missingSeasonsCount: number;
+    missingEpisodesCount: number;
+    recommendedAction: 'import_new' | 'merge_missing' | 'update_metadata' | 'skip';
+  };
+  warnings: string[];
+  error?: string | null;
+}
+
+export interface LinkImportHistoryItem {
+  id: string;
+  url: string;
+  domain: string;
+  status: 'SUCCESS' | 'UPDATED' | 'DUPLICATE' | 'FAILED';
+  tmdbId?: number;
+  type?: 'movie' | 'tv';
+  title: string;
+  releaseYear?: number;
+  seasonsImported?: number;
+  episodesImported?: number;
+  sourceLinksDetected?: number;
+  confidence?: 'high' | 'medium' | 'low';
+  details: string;
+  adminEmail: string;
+  timestamp: string;
+}
+
+export interface DiscoveredEpisodeSlot {
+  episodeNumber: number;
+  title: string;
+  overview?: string;
+  airDate?: string;
+  stillPath?: string;
+  duration?: number;
+  preparedUrl?: string;
+  sourceUrl: string | null;
+  originalUrl: string | null;
+  sourceType: 'mp4' | 'm3u8' | 'hls' | 'dash' | 'webm' | 'stream' | 'unknown' | 'html';
+  isDirectStream: boolean;
+  mgebApplied: boolean;
+  status: 'ready' | 'found' | 'pending' | 'invalid';
+  format?: string;
+  version?: 'dublado' | 'legendado';
+  note?: string;
+}
+
+export interface SeasonDiscoveryResult {
+  seasonNumber: number;
+  seasonName?: string;
+  expectedEpisodes: number;
+  foundCount?: number;
+  pendingCount?: number;
+  foundEpisodesCount: number;
+  pendingEpisodesCount: number;
+  readyEpisodesCount: number;
+  strategy: 'html_scrape' | 'sequential_pattern' | 'mixed' | 'tmdb_only';
+  status?: 'completed' | 'partial' | 'pending' | 'error';
+  message?: string;
+  episodes: DiscoveredEpisodeSlot[];
+}
+
+export type SeasonUrlPatternAdapterType =
+  | 'detail_trailing_number'
+  | 'temporada_segment'
+  | 'episode_segment'
+  | 'query_param'
+  | 'sxxexx_filename'
+  | 'manual_review_required';
+
+export type DiscoveredEpisodeVerificationStatus =
+  | 'verified'
+  | 'unconfirmed'
+  | 'pending'
+  | 'not_found'
+  | 'error';
+
+export type DetailedDiscoveryState =
+  | 'tmdb_prepared'
+  | 'url_generated'
+  | 'mgeb_applied'
+  | 'awaiting_verification'
+  | 'verified'
+  | 'unverified'
+  | 'blocked_by_provider'
+  | 'transient_error'
+  | 'incompatible_player'
+  | 'functional_source';
+
+export type PlaybackCompatibilityStatus =
+  | 'untested'
+  | 'compatible'
+  | 'unresolved'
+  | 'incompatible';
+
+export interface BatchEpisodeSourceDraft {
+  id: string;
+  originalUrl: string;
+  processedUrl: string;
+  processedUrlDisplay: string;
+  version: 'dublado' | 'legendado';
+  serverName: string;
+  quality: string;
+  useMgeb: boolean;
+  compatibilityStatus: PlaybackCompatibilityStatus;
+  compatibilityMessage?: string;
+  manualConfirmed?: boolean;
+  createdAt: string;
+}
+
+export interface BatchDiscoveredMovieItem {
+  movieId: string;
+  tmdbId: number;
+  title: string;
+  originalTitle?: string;
+  posterPath?: string;
+  releaseYear?: number;
+  overview?: string;
+  categories?: Array<'anime' | 'dorama'>;
+  confidence: 'high' | 'medium' | 'low';
+  existsInCatalog: boolean;
+  originalUrl: string;
+  processedUrl: string;
+  processedUrlDisplay: string;
+  useMgeb: boolean;
+  detailedState: DetailedDiscoveryState;
+  stateReason: string;
+  verificationStatus: DiscoveredEpisodeVerificationStatus;
+  playbackCompatibility: PlaybackCompatibilityStatus;
+  compatibilityMessage?: string;
+  httpStatus?: number | null;
+  protectionDetected?: boolean;
+  version: 'dublado' | 'legendado';
+  approved: boolean;
+  manualConfirmed?: boolean;
+  sources: BatchEpisodeSourceDraft[];
+  createdAt: string;
+}
+
+export interface BatchDiscoveredEpisode {
+  episodeId: string;
+  seriesId: string;
+  seasonId: string;
+  episodeNumber: number;
+  title: string;
+  overview?: string;
+  stillPath?: string;
+  duration?: number;
+  airDate?: string;
+  voteAverage?: number;
+  originalPageUrl: string;
+  episodePageUrl: string;
+  originalUrl: string;
+  processedUrl: string;
+  processedUrlDisplay: string;
+  playbackSourceUrl?: string | null;
+  playbackVersion?: 'dublado' | 'legendado';
+  useMgebForPlayback?: boolean;
+  verificationStatus: DiscoveredEpisodeVerificationStatus;
+  detailedState: DetailedDiscoveryState;
+  stateReason: string;
+  playbackCompatibility: PlaybackCompatibilityStatus;
+  compatibilityMessage?: string;
+  manualConfirmed?: boolean;
+  httpStatus?: number | null;
+  protectionDetected?: boolean;
+  diagnosticMessage?: string;
+  approved: boolean;
+  existsInCatalog?: boolean;
+  duplicateSourceExists?: boolean;
+  sources: BatchEpisodeSourceDraft[];
+  createdAt: string;
+}
+
+export interface BatchDiscoveredSeason {
+  seasonId: string;
+  seriesId: string;
+  seasonNumber: number;
+  name: string;
+  overview?: string;
+  posterPath?: string;
+  mainUrl: string;
+  processedMainUrl: string;
+  providerId?: string;
+  adapterType: SeasonUrlPatternAdapterType;
+  requiresManualReview: boolean;
+  patternNotice?: string;
+  tmdbExpectedCount: number;
+  discoveredCount: number;
+  verifiedCount: number;
+  unconfirmedCount: number;
+  blockedCount: number;
+  errorCount: number;
+  endDetectedReason?: string;
+  status: 'queued' | 'discovering' | 'completed' | 'partial' | 'unconfirmed' | 'error' | 'paused';
+  detailedState: DetailedDiscoveryState;
+  stateReason?: string;
+  errorMessage?: string | null;
+  approved: boolean;
+  episodes: BatchDiscoveredEpisode[];
+}
+
+export interface BatchSeriesDiscoveryGroup {
+  groupKey: string;
+  tmdbId: number;
+  title: string;
+  originalTitle?: string;
+  posterPath?: string;
+  overview?: string;
+  releaseYear?: number;
+  categories?: Array<'anime' | 'dorama'>;
+  confidence: 'high' | 'medium' | 'low';
+  existsInCatalog: boolean;
+  seasons: BatchDiscoveredSeason[];
+}
+
+export interface SeasonDiscoveryJob {
+  jobId: string;
+  status: 'RUNNING' | 'PAUSED' | 'COMPLETED' | 'CANCELLED' | 'ERROR';
+  createdAt: string;
+  updatedAt: string;
+  totalInputUrls: number;
+  totalMovies: number;
+  totalSeasons: number;
+  completedSeasons: number;
+  totalEpisodesDiscovered: number;
+  verifiedEpisodes: number;
+  unconfirmedEpisodes: number;
+  failedEpisodes: number;
+  maxEpisodesLimit: number;
+  currentTask: string;
+  errors: string[];
+  movieItems: BatchDiscoveredMovieItem[];
+  seriesGroups: BatchSeriesDiscoveryGroup[];
+  unmatchedUrls: Array<{ url: string; reason: string }>;
+}
+
+

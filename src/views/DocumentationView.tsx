@@ -387,24 +387,24 @@ export const DocumentationView: React.FC = () => {
     }
   ];
 
-  const embedIframeExample = `<!-- Embed Direto de Filme por TMDB ID -->
+  const embedIframeExample = `<!-- Embed Direto de Filme por TMDB ID (Responsivo 16:9) -->
 <iframe
   src="${baseUrl}/embed/550"
   width="100%"
-  height="540"
-  frameborder="0"
-  allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
+  style="aspect-ratio:16/9;border:0"
+  allow="autoplay; fullscreen; picture-in-picture"
   allowfullscreen
+  loading="lazy"
 ></iframe>
 
-<!-- Embed Direto de Série / Episódio por TMDB ID -->
+<!-- Embed Direto de Série / Episódio por TMDB ID (Responsivo 16:9) -->
 <iframe
   src="${baseUrl}/embed/1399/1/1"
   width="100%"
-  height="540"
-  frameborder="0"
-  allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
+  style="aspect-ratio:16/9;border:0"
+  allow="autoplay; fullscreen; picture-in-picture"
   allowfullscreen
+  loading="lazy"
 ></iframe>`;
 
   const jsIntegrationSnippet = `// RONYCINE DIRECT PLAY — JavaScript / TypeScript
@@ -612,7 +612,7 @@ webView.loadUrl("${baseUrl}/embed/1399/1/1")`;
             <div className="bg-[#111114] border border-white/10 rounded-xl p-4 space-y-5 sticky top-24">
               <div>
                 <h3 className="text-[11px] font-bold uppercase tracking-wider text-zinc-500 mb-2">
-                  Índice Oficial (9 Secções)
+                  Índice Oficial (10 Secções)
                 </h3>
                 <nav className="space-y-1 text-xs font-medium">
                   <a href="#introducao" className="block px-2.5 py-1.5 rounded hover:bg-white/5 text-zinc-300 hover:text-white">
@@ -650,6 +650,9 @@ webView.loadUrl("${baseUrl}/embed/1399/1/1")`;
                   </a>
                   <a href="#seguranca" className="block px-2.5 py-1.5 rounded hover:bg-white/5 text-zinc-300 hover:text-white">
                     9. Segurança e Autenticação
+                  </a>
+                  <a href="#player-universal-externo" className="block px-2.5 py-1.5 rounded hover:bg-white/5 text-emerald-400 hover:text-emerald-300 font-semibold">
+                    10. Integração do Player Universal
                   </a>
                 </nav>
               </div>
@@ -1490,6 +1493,179 @@ webView.loadUrl("${baseUrl}/embed/1399/1/1")`;
               </div>
               <div className="space-y-3">
                 {endpoints.filter((e) => e.section === 'auth').map(renderEndpointCard)}
+              </div>
+            </section>
+
+            {/* 10. INTEGRAÇÃO DO PLAYER UNIVERSAL EM SITES EXTERNOS */}
+            <section id="player-universal-externo" className="bg-[#111114] border border-[#E50914]/35 rounded-2xl p-6 space-y-6">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5 text-white font-bold text-lg">
+                  <Link2 className="w-5 h-5 text-[#E50914]" />
+                  <h2>10. INTEGRAÇÃO DO PLAYER UNIVERSAL EM SITES EXTERNOS</h2>
+                </div>
+                <span className="px-2.5 py-1 rounded bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 text-[10px] font-bold uppercase tracking-wider self-start sm:self-auto">
+                  Player Centralizado Oficial
+                </span>
+              </div>
+
+              <div className="bg-black/60 border border-white/10 rounded-xl p-4 space-y-2">
+                <p className="text-xs sm:text-sm text-zinc-300 leading-relaxed">
+                  O player oficial <strong className="text-white">RONYCINE CINEMA PRO</strong> é servido diretamente pela infraestrutura RONYCINE API.
+                  Sites externos <strong className="text-white">não precisam instalar, hospedar ou manter um player próprio</strong> — basta incorporar o endereço oficial abaixo via <code className="text-emerald-400">&lt;iframe&gt;</code>. Toda a resolução das fontes (MP4, HLS <code className="text-zinc-200">.m3u8</code>, DASH <code className="text-zinc-200">.mpd</code> ou Embed autorizado), controlo de qualidade, legendas e atualizações ficam 100% centralizadas na RONYCINE API.
+                </p>
+                <div className="text-[11px] font-mono text-zinc-400 pt-1">
+                  SITE EXTERNO → RONYCINE EMBED (/embed/...) → DIRECT PLAY API → RESOLUÇÃO DA FONTE → PLAYER RONYCINE CINEMA PRO
+                </div>
+              </div>
+
+              {/* Exemplo HTML Oficial Responsivo */}
+              <div className="space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-300">
+                    Código HTML Oficial para Incorporação (Responsivo 16:9)
+                  </h3>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      copyToClipboard(
+                        `<iframe\n  src="${baseUrl}/embed/550"\n  width="100%"\n  style="aspect-ratio:16/9;border:0"\n  allow="autoplay; fullscreen; picture-in-picture"\n  allowfullscreen\n  loading="lazy"\n></iframe>`,
+                        'sec10-iframe-official'
+                      )
+                    }
+                    className="px-2.5 py-1 rounded bg-white/5 hover:bg-white/10 border border-white/10 text-[11px] font-bold text-zinc-200 flex items-center gap-1.5 cursor-pointer"
+                  >
+                    {copied === 'sec10-iframe-official' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                    <span>{copied === 'sec10-iframe-official' ? 'Copiado!' : 'Copiar Código HTML'}</span>
+                  </button>
+                </div>
+                <pre className="bg-black border border-white/10 rounded-xl p-4 text-xs font-mono text-amber-300 overflow-x-auto">
+{`<iframe
+  src="${baseUrl}/embed/550"
+  width="100%"
+  style="aspect-ratio:16/9;border:0"
+  allow="autoplay; fullscreen; picture-in-picture"
+  allowfullscreen
+  loading="lazy"
+></iframe>`}
+                </pre>
+              </div>
+
+              {/* Exemplos para Filmes e Séries */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                <div className="bg-[#0c0c0f] border border-white/10 rounded-xl p-4 space-y-2">
+                  <div className="font-bold text-white flex items-center justify-between">
+                    <span>Exemplo — Filme (TMDB ID)</span>
+                    <button
+                      type="button"
+                      onClick={() => openEmbedPlayer({ type: 'movie', tmdbId: 550 })}
+                      className="text-[11px] text-[#E50914] hover:underline flex items-center gap-1 cursor-pointer"
+                    >
+                      <Play className="w-3 h-3 fill-current" />
+                      <span>Testar Embed</span>
+                    </button>
+                  </div>
+                  <code className="block bg-black border border-white/10 rounded-lg px-3 py-2 font-mono text-emerald-400 truncate">
+                    {baseUrl}/embed/550
+                  </code>
+                  <p className="text-[11px] text-zinc-400">
+                    Substitua <code className="text-zinc-200">550</code> pelo TMDB ID de qualquer filme publicado na biblioteca.
+                  </p>
+                </div>
+
+                <div className="bg-[#0c0c0f] border border-white/10 rounded-xl p-4 space-y-2">
+                  <div className="font-bold text-white flex items-center justify-between">
+                    <span>Exemplo — Série / Episódio (T01E01)</span>
+                    <button
+                      type="button"
+                      onClick={() => openEmbedPlayer({ type: 'tv', tmdbId: 1399, season: 1, episode: 1 })}
+                      className="text-[11px] text-[#E50914] hover:underline flex items-center gap-1 cursor-pointer"
+                    >
+                      <Play className="w-3 h-3 fill-current" />
+                      <span>Testar Embed</span>
+                    </button>
+                  </div>
+                  <code className="block bg-black border border-white/10 rounded-lg px-3 py-2 font-mono text-sky-400 truncate">
+                    {baseUrl}/embed/1399/1/1
+                  </code>
+                  <p className="text-[11px] text-zinc-400">
+                    Formato <code className="text-zinc-200">/embed/&#123;tmdb_id&#125;/&#123;temporada&#125;/&#123;episodio&#125;</code> com suporte a próximo episódio.
+                  </p>
+                </div>
+              </div>
+
+              {/* Autorização de Domínios & Tokens HMAC */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                <div className="bg-black/50 border border-white/10 rounded-xl p-4 space-y-2">
+                  <h3 className="font-bold text-white uppercase text-[11px] tracking-wider text-emerald-400">
+                    Como Autorizar o Seu Domínio no Portal Dev
+                  </h3>
+                  <ol className="list-decimal list-inside space-y-1.5 text-zinc-400 leading-relaxed">
+                    <li>Aceda ao <strong className="text-zinc-200">Portal Dev</strong> e crie ou selecione a sua aplicação.</li>
+                    <li>Adicione os domínios autorizados (ex.: <code className="text-zinc-200">meusite.com</code> ou <code className="text-zinc-200">*.meusite.com</code>).</li>
+                    <li>Guarde as alterações — o cabeçalho <code className="text-zinc-200">Content-Security-Policy: frame-ancestors</code> é atualizado automaticamente.</li>
+                    <li>Nunca exponha a sua <code className="text-zinc-200">x-api-key</code> secreta no código HTML ou JavaScript público do cliente.</li>
+                  </ol>
+                </div>
+
+                <div className="bg-black/50 border border-white/10 rounded-xl p-4 space-y-2">
+                  <h3 className="font-bold text-white uppercase text-[11px] tracking-wider text-amber-400">
+                    Sessões Assinadas com Token HMAC (Opcional)
+                  </h3>
+                  <p className="text-zinc-400 leading-relaxed">
+                    Para embeds com validade temporária, gere no seu backend um token via <code className="text-zinc-200">POST /api/v1/player/token</code> usando a sua API Key privada e passe apenas o token público na URL:
+                  </p>
+                  <code className="block bg-black border border-white/10 rounded-lg px-3 py-2 font-mono text-[11px] text-zinc-300 overflow-x-auto">
+                    {baseUrl}/embed/550?token=rcp_...
+                  </code>
+                </div>
+              </div>
+
+              {/* Respostas de Erro Esperadas */}
+              <div className="space-y-2">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-300">
+                  Exemplos de Erros & Estados de Segurança no Embed
+                </h3>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-[11px] font-mono">
+                  <div className="bg-black border border-red-500/25 rounded-lg p-3 space-y-1">
+                    <div className="text-red-400 font-bold">403 • DOMAIN_NOT_AUTHORIZED</div>
+                    <div className="text-zinc-400 font-sans">Domínio externo não registado na lista de domínios autorizados do Portal Dev.</div>
+                  </div>
+                  <div className="bg-black border border-amber-500/25 rounded-lg p-3 space-y-1">
+                    <div className="text-amber-400 font-bold">401 • PLAYBACK_TOKEN_EXPIRED</div>
+                    <div className="text-zinc-400 font-sans">Token HMAC expirado ou assinatura inválida. Gere novo token no servidor.</div>
+                  </div>
+                  <div className="bg-black border border-orange-500/25 rounded-lg p-3 space-y-1">
+                    <div className="text-orange-400 font-bold">200 • SOURCE_UNAVAILABLE</div>
+                    <div className="text-zinc-400 font-sans">Nenhuma fonte compatível/verificada disponível (ex.: página HTML ou endpoint PHP inválido).</div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3 pt-1">
+                <button
+                  type="button"
+                  onClick={() => openEmbedPlayer({ type: 'movie', tmdbId: 550 })}
+                  className="px-4 py-2.5 bg-[#E50914] hover:bg-[#b80710] text-white text-xs font-bold rounded-lg inline-flex items-center gap-2 cursor-pointer"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  <span>Testar Embed Filme (/embed/550)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => openEmbedPlayer({ type: 'tv', tmdbId: 1399, season: 1, episode: 1 })}
+                  className="px-4 py-2.5 bg-white/10 hover:bg-white/15 border border-white/15 text-white text-xs font-bold rounded-lg inline-flex items-center gap-2 cursor-pointer"
+                >
+                  <Tv className="w-3.5 h-3.5 text-[#E50914]" />
+                  <span>Testar Embed Série (/embed/1399/1/1)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigateTo('developer')}
+                  className="px-4 py-2.5 bg-black hover:bg-zinc-900 border border-white/15 text-zinc-200 text-xs font-bold rounded-lg inline-flex items-center gap-2 cursor-pointer"
+                >
+                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Gerir Domínios no Portal Dev</span>
+                </button>
               </div>
             </section>
           </div>

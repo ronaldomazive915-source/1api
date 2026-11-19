@@ -7,6 +7,7 @@ import { ErrorBoundary } from './components/ErrorBoundary.js';
 import { HomeView } from './views/HomeView.js';
 import { MoviesView } from './views/MoviesView.js';
 import { SeriesView } from './views/SeriesView.js';
+import { CategoryCatalogView } from './views/CategoryCatalogView.js';
 import { MyListView } from './views/MyListView.js';
 import { HistoryView } from './views/HistoryView.js';
 import { MediaDetailView } from './views/MediaDetailView.js';
@@ -22,6 +23,7 @@ import { PlansView } from './views/PlansView.js';
 import { ResourcesView } from './views/ResourcesView.js';
 import { FaqView } from './views/FaqView.js';
 import { DeveloperPortalView } from './views/DeveloperPortalView.js';
+import { SystemStatusView } from './views/SystemStatusView.js';
 
 const MainContent: React.FC = () => {
   const { activeView, selectedMediaId, goBack, navigateTo } = useAuth();
@@ -48,6 +50,10 @@ const MainContent: React.FC = () => {
         return <MoviesView />;
       case 'series':
         return <SeriesView />;
+      case 'animes':
+        return <CategoryCatalogView category="anime" />;
+      case 'doramas':
+        return <CategoryCatalogView category="dorama" />;
       case 'search':
         return <SearchView />;
       case 'documentation':
@@ -55,6 +61,9 @@ const MainContent: React.FC = () => {
         return <DocumentationView />;
       case 'developer':
         return <DeveloperPortalView />;
+      case 'status':
+      case 'saude':
+        return <SystemStatusView onBack={() => navigateTo('home')} />;
       case 'playground':
         return <PlaygroundView />;
       case 'plans':

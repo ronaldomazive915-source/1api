@@ -49,22 +49,23 @@ export const MediaDetailView: React.FC<MediaDetailViewProps> = ({ mediaId }) => 
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-[#0B0B0B] flex items-center justify-center pt-20">
-        <div className="w-10 h-10 border-3 border-[#E50914] border-t-transparent rounded-full animate-spin" />
+      <div className="min-h-screen bg-[#080808] flex flex-col items-center justify-center pt-20 gap-3">
+        <div className="w-12 h-12 border-2 border-[#E50914] border-t-transparent rounded-full animate-spin" />
+        <span className="text-[11px] font-black uppercase tracking-[0.25em] text-zinc-400">RONYCINE</span>
       </div>
     );
   }
 
   if (!media) {
     return (
-      <div className="min-h-screen bg-[#0B0B0B] text-white pt-32 px-4 text-center">
+      <div className="min-h-screen bg-[#080808] text-white pt-32 px-4 text-center">
         <div className="max-w-md mx-auto space-y-4">
           <Film className="w-12 h-12 text-zinc-700 mx-auto" />
           <h2 className="text-xl font-bold">Conteúdo não encontrado</h2>
           <p className="text-zinc-400 text-xs">O título pesquisado não está disponível no acervo.</p>
           <button
             onClick={() => navigateTo('home')}
-            className="px-6 py-2.5 bg-[#E50914] text-white font-bold rounded text-xs uppercase tracking-wider"
+            className="min-h-[44px] px-6 py-2.5 bg-[#E50914] text-white font-bold rounded-xl text-xs uppercase tracking-wider"
           >
             Voltar ao Início
           </button>
@@ -81,6 +82,54 @@ export const MediaDetailView: React.FC<MediaDetailViewProps> = ({ mediaId }) => 
   const posterSrc = resolveTmdbPosterUrl(media.posterPath, 'w500');
   const backdrop = resolveTmdbPosterUrl(media.backdropPath, 'w1280') || posterSrc;
 
+  // Detect saved resume time from localStorage
+  let resumeLabel: string | null = null;
+  let resumeSeason: number | undefined;
+  let resumeEpisode: number | undefined;
+  if (typeof window !== 'undefined') {
+    try {
+      const normalizedType = media.type === 'series' || media.type === 'tv' ? 'tv' : 'movie';
+      if (normalizedType === 'movie') {
+        const raw = localStorage.getItem(`ronycine_resume_movie-${media.tmdbId}`);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          const sec = Number(parsed?.time || 0);
+          const dur = Number(parsed?.duration || 0);
+          if (sec > 5 && (!dur || sec < dur * 0.95)) {
+            const m = Math.floor(sec / 60);
+            const s = Math.floor(sec % 60);
+            resumeLabel = `${m}:${String(s).padStart(2, '0')}`;
+          }
+        }
+      } else {
+        const prefix = `ronycine_resume_tv-${media.tmdbId}-`;
+        let bestUpdated = 0;
+        for (let i = 0; i < localStorage.length; i++) {
+          const k = localStorage.key(i);
+          if (!k || !k.startsWith(prefix)) continue;
+          const match = k.match(/-s(\d+)-e(\d+)$/);
+          const raw = localStorage.getItem(k);
+          if (!raw) continue;
+          const parsed = JSON.parse(raw);
+          const sec = Number(parsed?.time || 0);
+          const dur = Number(parsed?.duration || 0);
+          const upd = Number(parsed?.updatedAt || 0);
+          if (sec > 5 && (!dur || sec < dur * 0.95) && upd >= bestUpdated) {
+            bestUpdated = upd;
+            const m = Math.floor(sec / 60);
+            const s = Math.floor(sec % 60);
+            resumeLabel = `${m}:${String(s).padStart(2, '0')}`;
+            if (match) {
+              resumeSeason = parseInt(match[1], 10);
+              resumeEpisode = parseInt(match[2], 10);
+              resumeLabel = `T${resumeSeason}:E${resumeEpisode} (${resumeLabel})`;
+            }
+          }
+        }
+      }
+    } catch {}
+  }
+
   const handleShare = () => {
     if (navigator.clipboard) {
       navigator.clipboard.writeText(window.location.href);
@@ -90,7 +139,7 @@ export const MediaDetailView: React.FC<MediaDetailViewProps> = ({ mediaId }) => 
   };
 
   return (
-    <div className="min-h-screen bg-[#0B0B0B] text-white pb-24 overflow-x-hidden">
+    <div className="min-h-screen bg-[#080808] text-white pb-24 overflow-x-hidden">
       
       {/* BACKDROP HEADER */}
       <div className="relative w-full h-[45vh] min-h-[320px] max-h-[480px] overflow-hidden select-none">
@@ -101,14 +150,14 @@ export const MediaDetailView: React.FC<MediaDetailViewProps> = ({ mediaId }) => 
             className="w-full h-full object-cover object-top filter brightness-[0.75]"
           />
         )}
-        <div className="absolute inset-0 bg-gradient-to-t from-[#0B0B0B] via-[#0B0B0B]/60 to-transparent" />
-        <div className="absolute inset-0 bg-gradient-to-r from-[#0B0B0B] via-[#0B0B0B]/50 to-transparent w-full md:w-3/5" />
+        <div className="absolute inset-0 bg-gradient-to-t from-[#080808] via-[#080808]/60 to-transparent" />
+        <div className="absolute inset-0 bg-gradient-to-r from-[#080808] via-[#080808]/50 to-transparent w-full md:w-3/5" />
 
         {/* Back Button */}
         <div className="absolute top-20 left-4 sm:left-8 z-20">
           <button
             onClick={() => goBack(media?.type === 'tv' || media?.type === 'series' ? 'series' : 'movies')}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-black/60 hover:bg-black/90 text-zinc-300 hover:text-white rounded-lg border border-white/10 text-xs font-semibold backdrop-blur-sm transition-all"
+            className="min-h-[44px] sm:min-h-[38px] flex items-center gap-1.5 px-3.5 py-2 bg-black/70 hover:bg-[#E50914] text-zinc-200 hover:text-white rounded-xl border border-white/10 text-xs font-semibold backdrop-blur-sm transition-all"
           >
             <ArrowLeft className="w-3.5 h-3.5" />
             <span>Voltar</span>
@@ -182,7 +231,7 @@ export const MediaDetailView: React.FC<MediaDetailViewProps> = ({ mediaId }) => 
                 {media.genres.map((g) => (
                   <span
                     key={g}
-                    className="text-[11px] font-semibold text-zinc-300 px-2.5 py-0.5 rounded-full bg-white/5 border border-white/10"
+                    className="text-[11px] font-semibold text-zinc-200 px-2.5 py-1 rounded-md bg-[#202020] border border-white/10"
                   >
                     {g}
                   </span>
@@ -218,21 +267,28 @@ export const MediaDetailView: React.FC<MediaDetailViewProps> = ({ mediaId }) => 
               </div>
             )}
 
-            {/* ACTION BUTTONS (Assistir, Minha Lista, Trailer) */}
+            {/* ACTION BUTTONS (Assistir / Continuar, Minha Lista, Trailer, Partilhar) */}
             <div className="flex flex-wrap items-center gap-2.5 pt-2">
               <button
                 type="button"
-                onClick={() => navigateTo('watch', media.id, { type: media.type === 'series' ? 'tv' : media.type, tmdbId: media.tmdbId })}
-                className="flex items-center gap-2 px-6 py-2.5 sm:py-3 bg-[#E50914] hover:bg-[#b80710] text-white font-bold text-xs uppercase tracking-wider rounded-md transition-all active:scale-95 shadow-lg shadow-[#E50914]/25"
+                onClick={() =>
+                  navigateTo('watch', media.id, {
+                    type: media.type === 'series' ? 'tv' : media.type,
+                    tmdbId: media.tmdbId,
+                    season: resumeSeason,
+                    episode: resumeEpisode
+                  })
+                }
+                className="min-h-[44px] flex items-center gap-2 px-6 py-2.5 sm:py-3 bg-[#E50914] hover:bg-[#b80710] text-white font-bold text-xs uppercase tracking-wider rounded-xl transition-all active:scale-95 shadow-lg shadow-[#E50914]/30"
               >
                 <Play className="w-4 h-4 fill-white" />
-                <span>Assistir Agora</span>
+                <span>{resumeLabel ? `Continuar ${resumeLabel}` : 'Assistir Agora'}</span>
               </button>
 
               <button
                 type="button"
                 onClick={() => toggleMyList(media)}
-                className="flex items-center gap-1.5 px-4 py-2.5 sm:py-3 bg-white/10 hover:bg-white/15 text-white font-semibold text-xs rounded-md transition-all active:scale-95 border border-white/10"
+                className="min-h-[44px] flex items-center gap-1.5 px-4 py-2.5 sm:py-3 bg-[#111111] hover:bg-[#202020] text-white font-semibold text-xs rounded-xl transition-all active:scale-95 border border-white/10"
               >
                 {inList ? <Check className="w-4 h-4 text-[#E50914]" /> : <Plus className="w-4 h-4" />}
                 <span>{inList ? 'Na Minha Lista' : 'Minha Lista'}</span>
@@ -242,7 +298,7 @@ export const MediaDetailView: React.FC<MediaDetailViewProps> = ({ mediaId }) => 
                 <button
                   type="button"
                   onClick={() => setShowTrailerModal(true)}
-                  className="flex items-center gap-1.5 px-4 py-2.5 sm:py-3 bg-white/5 hover:bg-white/10 text-zinc-300 hover:text-white font-semibold text-xs rounded-md transition-all border border-white/10"
+                  className="min-h-[44px] flex items-center gap-1.5 px-4 py-2.5 sm:py-3 bg-[#111111] hover:bg-[#202020] text-zinc-200 hover:text-white font-semibold text-xs rounded-xl transition-all border border-white/10"
                 >
                   <Film className="w-4 h-4" />
                   <span>Trailer</span>
@@ -252,14 +308,14 @@ export const MediaDetailView: React.FC<MediaDetailViewProps> = ({ mediaId }) => 
               <button
                 type="button"
                 onClick={handleShare}
-                className="p-2.5 sm:p-3 bg-white/5 hover:bg-white/10 text-zinc-400 hover:text-white rounded-md transition-all border border-white/10"
+                className="min-w-[44px] min-h-[44px] p-2.5 sm:p-3 bg-[#111111] hover:bg-[#202020] text-zinc-300 hover:text-white rounded-xl transition-all border border-white/10 flex items-center justify-center"
                 title="Copiar link"
               >
-                <Share2 className="w-4 h-4" />
+                {copiedLink ? <Check className="w-4 h-4 text-emerald-400" /> : <Share2 className="w-4 h-4" />}
               </button>
 
               {copiedLink && (
-                <span className="text-[10px] text-emerald-400 font-bold">Link copiado!</span>
+                <span className="text-[11px] text-emerald-400 font-bold">Link copiado!</span>
               )}
             </div>
           </div>

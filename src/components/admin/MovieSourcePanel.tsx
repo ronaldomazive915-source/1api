@@ -23,6 +23,16 @@ import { classifySourceUrl, getStatusDisplayInfo } from '../../lib/sourceClassif
 import { resolveTmdbPosterUrl } from '../../lib/mediaUtils.js';
 import { RonycinePlayer } from '../player/RonycinePlayer.js';
 import { ErrorBoundary } from '../ErrorBoundary.js';
+import { PlaybackVersionsManager } from './PlaybackVersionsManager.js';
+import {
+  AUDIO_LANGUAGE_OPTIONS,
+  SOURCE_QUALITY_OPTIONS,
+  VERSION_TYPE_OPTIONS,
+  formatSourceOrganizedLabel,
+  formatVersionTypeLabel,
+  isPresetAudioLanguage,
+  normalizeVersionType
+} from '../../lib/sourceMetadata.js';
 
 interface MovieSourcePanelProps {
   catalogMovies: MediaItem[];
@@ -56,6 +66,9 @@ export const MovieSourcePanel: React.FC<MovieSourcePanelProps> = ({
   const [serverName, setServerName] = useState('MGEB Endpoint');
   const [format, setFormat] = useState<string>('php_endpoint');
   const [audioLanguage, setAudioLanguage] = useState('Português');
+  const [versionType, setVersionType] = useState<string>('dublado');
+  const [subtitleUrl, setSubtitleUrl] = useState<string>('');
+  const [subtitleLanguage, setSubtitleLanguage] = useState<string>('');
   const [quality, setQuality] = useState('1080p');
   const [isPrimary, setIsPrimary] = useState(true);
   const [priority, setPriority] = useState(1);
@@ -65,7 +78,36 @@ export const MovieSourcePanel: React.FC<MovieSourcePanelProps> = ({
   const [testingSource, setTestingSource] = useState(false);
   const [probeMessage, setProbeMessage] = useState<{ status: string; text: string } | null>(null);
   const [probeDiagnostics, setProbeDiagnostics] = useState<any>(null);
-  const [playTestUrl, setPlayTestUrl] = useState<string | null>(null);
+  const [playTestSourceData, setPlayTestSourceData] = useState<{
+    url: string;
+    format?: string;
+    versionType?: string;
+    audioLanguage?: string;
+    subtitleUrl?: string;
+    subtitleLanguage?: string;
+    quality?: string;
+    serverName?: string;
+    diagnostics?: any;
+  } | null>(null);
+  const [playTestDiag, setPlayTestDiag] = useState<{
+    status: 'playing' | 'confirmed' | 'format_error' | 'connection_error';
+    message: string;
+  }>({ status: 'playing', message: 'A inicializar stream no navegador...' });
+
+  const openPlayTest = (src: {
+    url: string;
+    format?: string;
+    versionType?: string;
+    audioLanguage?: string;
+    subtitleUrl?: string;
+    subtitleLanguage?: string;
+    quality?: string;
+    serverName?: string;
+    diagnostics?: any;
+  }) => {
+    setPlayTestDiag({ status: 'playing', message: 'A inicializar stream no navegador...' });
+    setPlayTestSourceData(src);
+  };
 
   // Save state
   const [saving, setSaving] = useState(false);
@@ -190,6 +232,19 @@ export const MovieSourcePanel: React.FC<MovieSourcePanelProps> = ({
     );
   }, [existingSources, selectedMovie]);
 
+  const groupedMovieSources = useMemo(() => {
+    const groups = new Map<string, VideoSource[]>();
+    for (const src of movieSources) {
+      const lang = (src.audioLanguage || 'Português').trim() || 'Português';
+      const ver = formatVersionTypeLabel(src.versionType || normalizeVersionType(undefined, src.serverName, src.audioLanguage)) || 'Versão Padrão';
+      const groupKey = `${lang} — ${ver}`;
+      const list = groups.get(groupKey) || [];
+      list.push(src);
+      groups.set(groupKey, list);
+    }
+    return Array.from(groups.entries());
+  }, [movieSources]);
+
   const urlEvaluation = useMemo(() => {
     const { innerUrl } = stripMgebPrefix(sourceUrl);
     return buildMgebUrl(useMgebPrefix ? innerUrl : sourceUrl, useMgebPrefix);
@@ -262,6 +317,9 @@ export const MovieSourcePanel: React.FC<MovieSourcePanelProps> = ({
         serverName: serverName.trim(),
         format: format as any,
         audioLanguage: audioLanguage.trim() || 'Português',
+        versionType,
+        subtitleUrl: subtitleUrl.trim() || undefined,
+        subtitleLanguage: subtitleLanguage.trim() || undefined,
         quality,
         isPrimary,
         priority: Math.max(1, Number(priority) || 1),
@@ -294,6 +352,15 @@ export const MovieSourcePanel: React.FC<MovieSourcePanelProps> = ({
       onSourceSaved();
     } catch (err) {
       console.error('Erro ao eliminar fonte:', err);
+    }
+  };
+
+  const handleToggleExistingEnabled = async (src: VideoSource) => {
+    try {
+      await api.updateVideoSource(src.id, { enabled: src.enabled === false });
+      onSourceSaved();
+    } catch (err) {
+      console.error('Erro ao alterar estado da fonte:', err);
     }
   };
 
@@ -454,6 +521,15 @@ export const MovieSourcePanel: React.FC<MovieSourcePanelProps> = ({
             )}
           </div>
 
+          {selectedMovie && (
+            <PlaybackVersionsManager
+              tmdbId={selectedMovie.tmdbId}
+              contentType="movie"
+              title={selectedMovie.title}
+              onUpdated={onSourceSaved}
+            />
+          )}
+
           {/* Step 2: Fixed MGEB Prefix + Source URL */}
           <div className="bg-[#111114] border border-white/10 rounded-2xl p-5 sm:p-6 space-y-5">
             <h4 className="text-xs font-black uppercase tracking-wider text-white">
@@ -466,7 +542,20 @@ export const MovieSourcePanel: React.FC<MovieSourcePanelProps> = ({
               onChangeUrl={handleUrlChange}
               onToggleMgebPrefix={handleToggleMgeb}
               onTestSource={handleTestSource}
-              onTogglePlayTest={() => urlEvaluation.valid && setPlayTestUrl(urlEvaluation.finalUrl)}
+              onTogglePlayTest={() =>
+                urlEvaluation.valid &&
+                openPlayTest({
+                  url: urlEvaluation.finalUrl,
+                  format,
+                  versionType,
+                  audioLanguage: audioLanguage.trim() || 'Português',
+                  subtitleUrl: subtitleUrl.trim() || undefined,
+                  subtitleLanguage: subtitleLanguage.trim() || undefined,
+                  quality,
+                  serverName,
+                  diagnostics: probeDiagnostics || undefined
+                })
+              }
               isTesting={testingSource}
               showPlayTest={urlEvaluation.valid}
               label="URL Original do Filme"
@@ -554,15 +643,48 @@ export const MovieSourcePanel: React.FC<MovieSourcePanelProps> = ({
 
               <div className="space-y-1.5">
                 <label className="text-[11px] font-bold uppercase tracking-wider text-zinc-400">
-                  Idioma do Áudio
+                  Idioma
                 </label>
-                <input
-                  type="text"
-                  value={audioLanguage}
-                  onChange={(e) => setAudioLanguage(e.target.value)}
+                <select
+                  value={isPresetAudioLanguage(audioLanguage) ? audioLanguage || 'Português' : 'Outro'}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setAudioLanguage(val === 'Outro' ? '' : val);
+                  }}
                   className="w-full bg-[#080808] border border-white/15 rounded-xl px-4 py-2.5 text-sm text-white focus:border-[#E50914] outline-none"
-                  placeholder="Ex: Português, Legendado"
-                />
+                >
+                  {AUDIO_LANGUAGE_OPTIONS.map((lang) => (
+                    <option key={lang} value={lang}>
+                      {lang}
+                    </option>
+                  ))}
+                </select>
+                {!isPresetAudioLanguage(audioLanguage) && (
+                  <input
+                    type="text"
+                    value={audioLanguage}
+                    onChange={(e) => setAudioLanguage(e.target.value)}
+                    className="w-full bg-[#080808] border border-white/15 rounded-xl px-4 py-2 text-sm text-white focus:border-[#E50914] outline-none mt-1.5"
+                    placeholder="Informe o idioma (ex: Japonês, Coreano)"
+                  />
+                )}
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-[11px] font-bold uppercase tracking-wider text-zinc-400">
+                  Tipo de Versão
+                </label>
+                <select
+                  value={versionType}
+                  onChange={(e) => setVersionType(e.target.value)}
+                  className="w-full bg-[#080808] border border-white/15 rounded-xl px-4 py-2.5 text-sm text-white focus:border-[#E50914] outline-none"
+                >
+                  {VERSION_TYPE_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
               </div>
 
               <div className="space-y-1.5">
@@ -574,12 +696,48 @@ export const MovieSourcePanel: React.FC<MovieSourcePanelProps> = ({
                   onChange={(e) => setQuality(e.target.value)}
                   className="w-full bg-[#080808] border border-white/15 rounded-xl px-4 py-2.5 text-sm text-white focus:border-[#E50914] outline-none"
                 >
-                  <option value="Automática">Automática</option>
-                  <option value="4K">4K Ultra HD</option>
-                  <option value="1080p">1080p Full HD</option>
-                  <option value="720p">720p HD</option>
-                  <option value="480p">480p SD</option>
+                  {SOURCE_QUALITY_OPTIONS.map((q) => (
+                    <option key={q} value={q}>
+                      {q === 'Automática'
+                        ? 'Automática / Desconhecida'
+                        : q === '4K'
+                          ? '4K (2160p Ultra HD)'
+                          : q === '1440p'
+                            ? '1440p (2K QHD)'
+                            : q === '1080p'
+                              ? '1080p Full HD'
+                              : q === '720p'
+                                ? '720p HD'
+                                : q}
+                    </option>
+                  ))}
                 </select>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-[11px] font-bold uppercase tracking-wider text-zinc-400">
+                  Legenda Externa (.srt / .vtt) — Opcional
+                </label>
+                <input
+                  type="url"
+                  value={subtitleUrl}
+                  onChange={(e) => setSubtitleUrl(e.target.value)}
+                  className="w-full bg-[#080808] border border-white/15 rounded-xl px-4 py-2.5 text-sm text-white font-mono focus:border-[#E50914] outline-none"
+                  placeholder="https://.../legenda.srt ou .vtt"
+                />
+              </div>
+
+              <div className="space-y-1.5 sm:col-span-2">
+                <label className="text-[11px] font-bold uppercase tracking-wider text-zinc-400">
+                  Idioma da Legenda — Opcional
+                </label>
+                <input
+                  type="text"
+                  value={subtitleLanguage}
+                  onChange={(e) => setSubtitleLanguage(e.target.value)}
+                  className="w-full bg-[#080808] border border-white/15 rounded-xl px-4 py-2.5 text-sm text-white focus:border-[#E50914] outline-none"
+                  placeholder="Ex: Português, Inglês, Espanhol"
+                />
               </div>
             </div>
 
@@ -640,7 +798,19 @@ export const MovieSourcePanel: React.FC<MovieSourcePanelProps> = ({
               {urlEvaluation.valid && (
                 <button
                   type="button"
-                  onClick={() => setPlayTestUrl(urlEvaluation.finalUrl)}
+                  onClick={() =>
+                    openPlayTest({
+                      url: urlEvaluation.finalUrl,
+                      format,
+                      versionType,
+                      audioLanguage: audioLanguage.trim() || 'Português',
+                      subtitleUrl: subtitleUrl.trim() || undefined,
+                      subtitleLanguage: subtitleLanguage.trim() || undefined,
+                      quality,
+                      serverName,
+                      diagnostics: probeDiagnostics || undefined
+                    })
+                  }
                   className="px-4 py-2.5 bg-white/5 hover:bg-white/10 border border-white/10 text-zinc-200 rounded-xl text-xs font-bold uppercase tracking-wider flex items-center gap-2 whitespace-nowrap"
                 >
                   <Play className="w-3.5 h-3.5 text-[#E50914]" />
@@ -725,54 +895,102 @@ export const MovieSourcePanel: React.FC<MovieSourcePanelProps> = ({
                       Nenhuma fonte registada para este filme ainda.
                     </div>
                   ) : (
-                    <div className="space-y-2.5 max-h-96 overflow-y-auto pr-1">
-                      {movieSources.map((src) => {
-                        const displayUrl = src.originalUrl || src.url;
-                        const statusInfo = getStatusDisplayInfo(src.status);
-                        return (
-                          <div
-                            key={src.id}
-                            className="p-3.5 rounded-xl bg-[#080808] border border-white/10 space-y-2"
-                          >
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="flex items-center gap-2 min-w-0">
-                                <Server className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
-                                <span className="text-xs font-bold text-white truncate">{src.serverName}</span>
-                                {src.isPrimary && (
-                                  <span className="px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[9px] font-black uppercase">
-                                    Principal
-                                  </span>
-                                )}
-                              </div>
-                              <div className="flex items-center gap-1 shrink-0">
-                                <button
-                                  type="button"
-                                  onClick={() => setPlayTestUrl(displayUrl)}
-                                  className="p-1.5 rounded-lg bg-[#E50914]/15 text-[#E50914] hover:bg-[#E50914] hover:text-white transition-colors"
-                                  title="Testar no Player"
-                                >
-                                  <Play className="w-3.5 h-3.5 fill-current" />
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => handleDeleteExisting(src.id)}
-                                  className="p-1.5 rounded-lg bg-red-500/10 text-red-400 hover:bg-red-500 hover:text-white transition-colors"
-                                  title="Remover Fonte"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </button>
-                              </div>
-                            </div>
-                            <p className="text-[11px] font-mono text-zinc-400 break-all">{displayUrl}</p>
-                            <div className="flex items-center justify-between text-[10px] text-zinc-500">
-                              <span>
-                                {src.format} · {src.quality} · {src.audioLanguage}
-                              </span>
-                              <span className="font-bold text-zinc-300">{statusInfo.label}</span>
-                            </div>
+                    <div className="space-y-3 max-h-[28rem] overflow-y-auto pr-1">
+                      {groupedMovieSources.map(([groupLabel, groupItems]) => (
+                        <div key={groupLabel} className="space-y-2 rounded-xl bg-black/50 border border-white/10 p-3">
+                          <div className="flex items-center justify-between border-b border-white/5 pb-1.5">
+                            <span className="text-[11px] font-black uppercase tracking-wider text-[#E50914]">
+                              {groupLabel}
+                            </span>
+                            <span className="text-[10px] font-mono text-zinc-500">
+                              {groupItems.length} fonte(s)
+                            </span>
                           </div>
-                        );
-                      })}
+                          {groupItems.map((src) => {
+                            const displayUrl = src.originalUrl || src.url;
+                            const statusInfo = getStatusDisplayInfo(src.status);
+                            const organizedLabel = formatSourceOrganizedLabel(src);
+                            return (
+                              <div
+                                key={src.id}
+                                className="p-3 rounded-xl bg-[#080808] border border-white/10 space-y-2"
+                              >
+                                <div className="flex items-center justify-between gap-2">
+                                  <div className="flex items-center gap-2 min-w-0 flex-wrap">
+                                    <Server className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
+                                    <span className={`text-xs font-bold truncate ${src.enabled === false ? 'text-zinc-500 line-through' : 'text-white'}`}>
+                                      {src.serverName}
+                                    </span>
+                                    {src.isPrimary && (
+                                      <span className="px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[9px] font-black uppercase">
+                                        Principal
+                                      </span>
+                                    )}
+                                    {src.enabled === false && (
+                                      <span className="px-1.5 py-0.5 rounded bg-red-500/15 border border-red-500/30 text-red-300 text-[9px] font-black uppercase">
+                                        Desativada
+                                      </span>
+                                    )}
+                                    {src.subtitleUrl && (
+                                      <span className="px-1.5 py-0.5 rounded bg-sky-500/15 border border-sky-500/30 text-sky-300 text-[9px] font-black uppercase">
+                                        Legenda {src.subtitleLanguage ? `(${src.subtitleLanguage})` : 'Externa'}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="flex items-center gap-1 shrink-0">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleToggleExistingEnabled(src)}
+                                      className={`p-1.5 rounded-lg transition-colors ${
+                                        src.enabled === false
+                                          ? 'bg-red-500/15 text-red-400 hover:bg-red-500/25'
+                                          : 'bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20'
+                                      }`}
+                                      title={src.enabled === false ? 'Ativar Fonte' : 'Desativar Fonte'}
+                                    >
+                                      <Power className="w-3.5 h-3.5" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        openPlayTest({
+                                          url: displayUrl,
+                                          format: src.format,
+                                          versionType: src.versionType,
+                                          audioLanguage: src.audioLanguage,
+                                          subtitleUrl: src.subtitleUrl,
+                                          subtitleLanguage: src.subtitleLanguage,
+                                          quality: src.quality,
+                                          serverName: src.serverName,
+                                          diagnostics: src.diagnostics
+                                        })
+                                      }
+                                      className="p-1.5 rounded-lg bg-[#E50914]/15 text-[#E50914] hover:bg-[#E50914] hover:text-white transition-colors"
+                                      title="Testar no Player"
+                                    >
+                                      <Play className="w-3.5 h-3.5 fill-current" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleDeleteExisting(src.id)}
+                                      className="p-1.5 rounded-lg bg-red-500/10 text-red-400 hover:bg-red-500 hover:text-white transition-colors"
+                                      title="Remover Fonte"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  </div>
+                                </div>
+                                <div className="text-[11px] font-bold text-zinc-200">{organizedLabel}</div>
+                                <p className="text-[11px] font-mono text-zinc-400 break-all">{displayUrl}</p>
+                                <div className="flex items-center justify-between text-[10px] text-zinc-500">
+                                  <span className="uppercase font-mono">{src.format}</span>
+                                  <span className="font-bold text-zinc-300">{statusInfo.label}</span>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ))}
                     </div>
                   )}
                 </div>
@@ -791,41 +1009,83 @@ export const MovieSourcePanel: React.FC<MovieSourcePanelProps> = ({
       </div>
 
       {/* Play Test Modal */}
-      {playTestUrl && (
+      {playTestSourceData && (
         <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/90 backdrop-blur-sm">
           <div className="w-full max-w-4xl bg-[#0c0c0c] border border-white/15 rounded-2xl overflow-hidden shadow-2xl">
             <div className="p-4 border-b border-white/10 flex items-center justify-between gap-3">
               <div className="min-w-0">
-                <h4 className="text-sm font-black text-white uppercase truncate">
-                  Teste de Reprodução — {selectedMovie?.title || serverName}
-                </h4>
-                <p className="text-[11px] font-mono text-zinc-400 truncate">{playTestUrl}</p>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h4 className="text-sm font-black text-white uppercase truncate">
+                    Teste de Reprodução — {selectedMovie?.title || playTestSourceData.serverName || serverName}
+                  </h4>
+                  <span
+                    className={`px-2 py-0.5 rounded text-[10px] font-black uppercase ${
+                      playTestDiag.status === 'confirmed'
+                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                        : playTestDiag.status === 'format_error' || playTestDiag.status === 'connection_error'
+                          ? 'bg-red-500/20 text-red-300 border border-[#E50914]/40'
+                          : 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+                    }`}
+                  >
+                    {playTestDiag.status === 'confirmed'
+                      ? 'REPRODUÇÃO CONFIRMADA'
+                      : playTestDiag.status === 'format_error'
+                        ? 'ERRO DE FORMATO'
+                        : playTestDiag.status === 'connection_error'
+                          ? 'ERRO DE CONEXÃO'
+                          : 'TESTE EM ANDAMENTO'}
+                  </span>
+                </div>
+                <p className="text-[11px] font-mono text-zinc-400 truncate mt-0.5">{playTestSourceData.url}</p>
+                <p className="text-[11px] text-zinc-300 mt-0.5">{playTestDiag.message}</p>
               </div>
               <button
                 type="button"
-                onClick={() => setPlayTestUrl(null)}
+                onClick={() => setPlayTestSourceData(null)}
                 className="p-1.5 text-zinc-400 hover:text-white rounded-lg"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
             <div className="aspect-video bg-black">
-              <ErrorBoundary fallbackTitle="Erro no teste de reprodução" resetKey={playTestUrl}>
+              <ErrorBoundary fallbackTitle="Erro no teste de reprodução" resetKey={playTestSourceData.url}>
                 <RonycinePlayer
                   sources={[
                     {
                       id: `preview-${Date.now()}`,
-                      url: playTestUrl,
-                      originalUrl: playTestUrl,
-                      format: format as any,
-                      serverName,
-                      audioLanguage,
-                      quality,
+                      url: playTestSourceData.url,
+                      originalUrl: playTestSourceData.url,
+                      format: (playTestSourceData.format || classifySourceUrl(playTestSourceData.url).suggestedFormat) as any,
+                      sourceKind: classifySourceUrl(playTestSourceData.url).sourceKind,
+                      serverName: playTestSourceData.serverName || serverName,
+                      audioLanguage: playTestSourceData.audioLanguage || audioLanguage,
+                      versionType: playTestSourceData.versionType || versionType,
+                      subtitleUrl: playTestSourceData.subtitleUrl,
+                      subtitleLanguage: playTestSourceData.subtitleLanguage,
+                      quality: playTestSourceData.quality || quality,
+                      diagnostics: playTestSourceData.diagnostics,
                       isPrimary: true
                     }
                   ]}
                   title={selectedMovie?.title || serverName}
                   autoplay={true}
+                  onPlaybackEvent={(status, message) => {
+                    if (status === 'STARTED') {
+                      setPlayTestDiag({
+                        status: 'confirmed',
+                        message: 'Stream inicializado e reproduzido com sucesso no player.'
+                      });
+                    } else {
+                      const lower = (message || '').toLowerCase();
+                      setPlayTestDiag({
+                        status:
+                          lower.includes('formato') || lower.includes('descodificar') || lower.includes('html')
+                            ? 'format_error'
+                            : 'connection_error',
+                        message: message || 'Não foi possível reproduzir esta fonte.'
+                      });
+                    }
+                  }}
                 />
               </ErrorBoundary>
             </div>

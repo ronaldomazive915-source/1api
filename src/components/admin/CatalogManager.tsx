@@ -35,14 +35,16 @@ import {
   EyeOff,
   RotateCcw
 } from 'lucide-react';
-import { api } from '../../lib/api.js';
+import { api, CATALOG_UPDATED_EVENT } from '../../lib/api.js';
 import {
   MediaItem,
   CatalogStats,
   CatalogAuditSummary,
   PlayerSource,
   Season,
-  Episode
+  Episode,
+  SeriesComparisonReport,
+  PlaybackVersionAvailability
 } from '../../types.js';
 import {
   resolveTmdbPosterUrl,
@@ -50,12 +52,14 @@ import {
   formatAdminDate,
   getSourceSummaryDisplay
 } from '../../lib/mediaUtils.js';
+import { PlaybackVersionsManager } from './PlaybackVersionsManager.js';
 
 interface CatalogManagerProps {
   onSwitchTab?: (tabId: string) => void;
   onStatsUpdated?: () => void;
   onOpenSources?: (item: MediaItem, seasonNumber?: number, episodeNumber?: number) => void;
   initialFilterType?: 'all' | 'movie' | 'tv' | string;
+  initialFilterCategory?: 'all' | 'anime' | 'dorama' | string;
   initialFilterGenre?: string;
   externalSearch?: { query: string; nonce: number } | null;
 }
@@ -117,6 +121,7 @@ interface EpisodeWithSources extends Episode {
   sources?: PlayerSource[];
   sourcesCount?: number;
   sourceStatus?: string;
+  versionAvailability?: PlaybackVersionAvailability;
 }
 
 interface SeasonWithSources extends Omit<Season, 'episodes'> {
@@ -129,11 +134,14 @@ export const CatalogManager: React.FC<CatalogManagerProps> = ({
   onStatsUpdated,
   onOpenSources,
   initialFilterType = 'all',
+  initialFilterCategory = 'all',
   initialFilterGenre = 'all',
   externalSearch
 }) => {
   const isMovieCatalog = initialFilterType === 'movie';
   const isSeriesCatalog = initialFilterType === 'tv';
+  const isAnimeCatalog = initialFilterCategory === 'anime';
+  const isDoramaCatalog = initialFilterCategory === 'dorama';
   const isTypeLocked = isMovieCatalog || isSeriesCatalog;
 
   // --- STATE ---
@@ -142,7 +150,7 @@ export const CatalogManager: React.FC<CatalogManagerProps> = ({
   const [totalPages, setTotalPages] = useState<number>(1);
   const [currentPage, setCurrentPage] = useState<number>(() => {
     try {
-      const saved = sessionStorage.getItem(`ronycine_admin_catalog_${initialFilterType || 'all'}`);
+      const saved = sessionStorage.getItem(`ronycine_admin_catalog_${initialFilterCategory || initialFilterType || 'all'}`);
       return saved ? JSON.parse(saved).page || 1 : 1;
     } catch {
       return 1;
@@ -165,6 +173,7 @@ export const CatalogManager: React.FC<CatalogManagerProps> = ({
   const [exportMenuOpen, setExportMenuOpen] = useState<boolean>(false);
 
   const [filterType, setFilterType] = useState<string>(initialFilterType);
+  const [filterCategory, setFilterCategory] = useState<string>(initialFilterCategory);
   const [filterGenre, setFilterGenre] = useState<string>(initialFilterGenre);
   const [filterPublishStatus, setFilterPublishStatus] = useState<string>('all');
   const [filterSourceStatus, setFilterSourceStatus] = useState<string>('all');
@@ -181,10 +190,21 @@ export const CatalogManager: React.FC<CatalogManagerProps> = ({
   const [detailsLoading, setDetailsLoading] = useState<boolean>(false);
   const [detailsItem, setDetailsItem] = useState<MediaItem | null>(null);
   const [detailsSources, setDetailsSources] = useState<PlayerSource[]>([]);
+  const [detailsComparison, setDetailsComparison] = useState<SeriesComparisonReport | null>(null);
   const [selectedSeasonNum, setSelectedSeasonNum] = useState<number>(1);
+  const [detailsEpPage, setDetailsEpPage] = useState<number>(1);
+  const [detailsShowAllEps, setDetailsShowAllEps] = useState<boolean>(false);
   const [syncingSeasonNum, setSyncingSeasonNum] = useState<number | null>(null);
+  const [detailsVersionEpisode, setDetailsVersionEpisode] = useState<{
+    seasonNumber: number;
+    episodeNumber: number;
+    title?: string;
+  } | null>(null);
 
   const [editingItem, setEditingItem] = useState<(MediaItem & { genresText?: string }) | null>(null);
+  const [editDetailedItem, setEditDetailedItem] = useState<MediaItem | null>(null);
+  const [editVersionSeason, setEditVersionSeason] = useState<number>(1);
+  const [editVersionEpisode, setEditVersionEpisode] = useState<number>(1);
   const [diagnosticItem, setDiagnosticItem] = useState<any | null>(null);
   const [deleteModalItem, setDeleteModalItem] = useState<MediaItem | null>(null);
   const [deletePermanent, setDeletePermanent] = useState<boolean>(false);
@@ -201,9 +221,10 @@ export const CatalogManager: React.FC<CatalogManagerProps> = ({
 
   useEffect(() => {
     setFilterType(initialFilterType);
+    setFilterCategory(initialFilterCategory);
     setFilterGenre(initialFilterGenre);
     try {
-      const saved = sessionStorage.getItem(`ronycine_admin_catalog_${initialFilterType || 'all'}`);
+      const saved = sessionStorage.getItem(`ronycine_admin_catalog_${initialFilterCategory || initialFilterType || 'all'}`);
       if (saved) {
         const parsed = JSON.parse(saved);
         if (parsed.page && typeof parsed.page === 'number') {
@@ -212,13 +233,14 @@ export const CatalogManager: React.FC<CatalogManagerProps> = ({
       }
     } catch (_) {}
     setSelectedIds([]);
-  }, [initialFilterType, initialFilterGenre]);
+  }, [initialFilterType, initialFilterCategory, initialFilterGenre]);
 
   // Persist page and filter state across navigation
   useEffect(() => {
     try {
-      sessionStorage.setItem(`ronycine_admin_catalog_${initialFilterType || 'all'}`, JSON.stringify({
+      sessionStorage.setItem(`ronycine_admin_catalog_${initialFilterCategory || initialFilterType || 'all'}`, JSON.stringify({
         page: currentPage,
+        category: filterCategory,
         genre: filterGenre,
         publishStatus: filterPublishStatus,
         sourceStatus: filterSourceStatus,
@@ -227,7 +249,7 @@ export const CatalogManager: React.FC<CatalogManagerProps> = ({
         search: searchQuery
       }));
     } catch (_) {}
-  }, [currentPage, filterGenre, filterPublishStatus, filterSourceStatus, sortOption, itemsPerPage, searchQuery, initialFilterType]);
+  }, [currentPage, filterCategory, filterGenre, filterPublishStatus, filterSourceStatus, sortOption, itemsPerPage, searchQuery, initialFilterType, initialFilterCategory]);
 
   useEffect(() => {
     if (externalSearch && externalSearch.query !== undefined) {
@@ -275,6 +297,7 @@ export const CatalogManager: React.FC<CatalogManagerProps> = ({
         api.getAdminCatalog(
           {
             type: filterType,
+            category: filterCategory !== 'all' ? filterCategory : undefined,
             genre: filterGenre,
             search: debouncedSearch,
             yearFrom: filterYearFrom ? parseInt(filterYearFrom, 10) : undefined,
@@ -321,6 +344,7 @@ export const CatalogManager: React.FC<CatalogManagerProps> = ({
     currentPage,
     itemsPerPage,
     filterType,
+    filterCategory,
     filterGenre,
     filterPublishStatus,
     filterSourceStatus,
@@ -329,6 +353,14 @@ export const CatalogManager: React.FC<CatalogManagerProps> = ({
     filterYearTo,
     sortOption
   ]);
+
+  useEffect(() => {
+    const onUpdated = () => {
+      fetchCatalogData();
+    };
+    window.addEventListener(CATALOG_UPDATED_EVENT, onUpdated);
+    return () => window.removeEventListener(CATALOG_UPDATED_EVENT, onUpdated);
+  }, [filterType, filterCategory, debouncedSearch, currentPage]);
 
   const showNotification = (msg: string) => {
     setActionSuccessMsg(msg);
@@ -351,10 +383,44 @@ export const CatalogManager: React.FC<CatalogManagerProps> = ({
     setActiveMenuId(null);
   };
 
+  useEffect(() => {
+    if (!editingItem || !editingItem.id) {
+      setEditDetailedItem(null);
+      return;
+    }
+    const isSer = editingItem.type === 'tv' || editingItem.type === 'series';
+    if (!isSer) {
+      setEditDetailedItem(editingItem);
+      return;
+    }
+    let cancelled = false;
+    api
+      .getAdminCatalogDetails(editingItem.id)
+      .then(res => {
+        if (!cancelled && res?.item) {
+          setEditDetailedItem(res.item);
+          const firstSeason = res.item.seasons?.find(s => Number(s.seasonNumber) > 0) || res.item.seasons?.[0];
+          if (firstSeason) {
+            setEditVersionSeason(Number(firstSeason.seasonNumber));
+            const firstEp = firstSeason.episodes?.[0];
+            setEditVersionEpisode(firstEp ? Number(firstEp.episodeNumber) : 1);
+          }
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [editingItem?.id]);
+
   // --- DETAILS / SERIES EPISODE INSPECTOR ---
   const openDetailsModal = async (item: MediaItem, syncSeasons = false, targetSeason?: number) => {
     setActiveMenuId(null);
     setDetailsItem(item);
+    setDetailsComparison(null);
+    setDetailsVersionEpisode(null);
+    setDetailsEpPage(1);
+    setDetailsShowAllEps(false);
     setDetailsModalOpen(true);
     setDetailsLoading(true);
     try {
@@ -366,6 +432,14 @@ export const CatalogManager: React.FC<CatalogManagerProps> = ({
         setSelectedSeasonNum(targetSeason);
       } else if (firstSeason) {
         setSelectedSeasonNum(firstSeason.seasonNumber);
+      }
+      if ((res.item.type === 'tv' || res.item.type === 'series') && res.item.tmdbId) {
+        api
+          .getSeriesComparison(res.item.tmdbId, true)
+          .then(cmp => {
+            if (cmp?.report) setDetailsComparison(cmp.report);
+          })
+          .catch(() => {});
       }
     } catch (err: any) {
       setErrorBanner(`Erro ao carregar detalhes de "${item.title}": ${err.message}`);
@@ -400,7 +474,7 @@ export const CatalogManager: React.FC<CatalogManagerProps> = ({
     showNotification(`Sincronizando "${item.title}" com o TMDB...`);
     try {
       const mediaType: 'movie' | 'tv' = item.type === 'tv' || item.type === 'series' ? 'tv' : 'movie';
-      const res = await api.updateTmdbMedia(item.tmdbId, mediaType);
+      const res = await api.updateTmdbMedia(item.tmdbId, mediaType, item.categories);
       if (res.success) {
         showNotification(`✓ "${item.title}" atualizado preservando fontes e episódios!`);
         fetchCatalogData();
@@ -573,6 +647,7 @@ export const CatalogManager: React.FC<CatalogManagerProps> = ({
 
   const resetFilters = () => {
     if (!isTypeLocked) setFilterType('all');
+    if (!isAnimeCatalog && !isDoramaCatalog) setFilterCategory('all');
     setFilterGenre('all');
     setFilterPublishStatus('all');
     setFilterSourceStatus('all');
@@ -644,20 +719,29 @@ export const CatalogManager: React.FC<CatalogManagerProps> = ({
     );
   };
 
-  const headerTitle = isMovieCatalog
-    ? 'Catálogo de Filmes'
-    : isSeriesCatalog
-    ? 'Catálogo de Séries'
-    : 'Gestão Completa de Catálogo';
+  const headerTitle = isAnimeCatalog
+    ? 'Catálogo de Animes'
+    : isDoramaCatalog
+      ? 'Catálogo de Doramas'
+      : isMovieCatalog
+        ? 'Catálogo de Filmes'
+        : isSeriesCatalog
+          ? 'Catálogo de Séries'
+          : 'Gestão Completa de Catálogo';
 
-  const headerSubtitle = isMovieCatalog
-    ? 'Listagem isolada de todos os filmes registados na base de dados RONYCINE.'
-    : isSeriesCatalog
-    ? 'Listagem isolada de séries, temporadas, episódios e fontes associadas.'
-    : 'Controle unificado sobre filmes e séries registados no acervo RONYCINE.';
+  const headerSubtitle = isAnimeCatalog
+    ? 'Animes (filmes e séries) registados no catálogo central RONYCINE sem duplicação.'
+    : isDoramaCatalog
+      ? 'Doramas e dramas asiáticos registados no catálogo central RONYCINE.'
+      : isMovieCatalog
+        ? 'Listagem isolada de todos os filmes registados na base de dados RONYCINE.'
+        : isSeriesCatalog
+          ? 'Listagem isolada de séries, temporadas, episódios e fontes associadas.'
+          : 'Controle unificado sobre filmes, séries, animes e doramas no acervo RONYCINE.';
 
   const activeFilterCount = [
     !isTypeLocked && filterType !== 'all',
+    filterCategory !== 'all' && !isAnimeCatalog && !isDoramaCatalog,
     filterGenre !== 'all',
     filterPublishStatus !== 'all',
     filterSourceStatus !== 'all',
@@ -666,11 +750,15 @@ export const CatalogManager: React.FC<CatalogManagerProps> = ({
     Boolean(filterYearTo)
   ].filter(Boolean).length;
 
-  const dbSectionTotal = isMovieCatalog
-    ? audit?.dbMoviesTotal ?? stats?.totalMovies ?? 0
-    : isSeriesCatalog
-    ? audit?.dbSeriesTotal ?? stats?.totalSeries ?? 0
-    : audit?.dbTotal ?? (stats ? stats.totalMovies + stats.totalSeries : 0);
+  const dbSectionTotal = isAnimeCatalog
+    ? stats?.totalAnimes ?? totalCount
+    : isDoramaCatalog
+      ? stats?.totalDoramas ?? totalCount
+      : isMovieCatalog
+        ? audit?.dbMoviesTotal ?? stats?.totalMovies ?? 0
+        : isSeriesCatalog
+          ? audit?.dbSeriesTotal ?? stats?.totalSeries ?? 0
+          : audit?.dbTotal ?? (stats ? stats.totalMovies + stats.totalSeries : 0);
 
   return (
     <div className="space-y-5 text-zinc-100 font-sans">
@@ -924,6 +1012,78 @@ export const CatalogManager: React.FC<CatalogManagerProps> = ({
         )}
       </div>
 
+      {/* METADATA COMPLETENESS ALERTS STRIP */}
+      {stats?.metadataAlerts && (stats.metadataAlertsCount ?? 0) > 0 && (
+        <div className="bg-amber-950/20 border border-amber-500/25 rounded-2xl px-4 py-3 flex flex-wrap items-center justify-between gap-3 text-xs">
+          <div className="flex flex-wrap items-center gap-3 text-amber-200">
+            <span className="font-bold flex items-center gap-1.5 text-amber-300">
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+              Alertas de Metadados ({stats.metadataAlertsCount}):
+            </span>
+            {stats.metadataAlerts.missingPoster > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  setFilterDiagnostic('MISSING_POSTER');
+                  setCurrentPage(1);
+                }}
+                className="px-2 py-0.5 rounded bg-black/40 border border-amber-500/25 hover:border-amber-400 text-[11px]"
+              >
+                {stats.metadataAlerts.missingPoster} sem poster
+              </button>
+            )}
+            {stats.metadataAlerts.incompleteInfo > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  setFilterDiagnostic('INCOMPLETE');
+                  setCurrentPage(1);
+                }}
+                className="px-2 py-0.5 rounded bg-black/40 border border-amber-500/25 hover:border-amber-400 text-[11px]"
+              >
+                {stats.metadataAlerts.incompleteInfo} incompletos
+              </button>
+            )}
+            {stats.metadataAlerts.invalidTmdb > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  setFilterDiagnostic('MISSING_TMDB');
+                  setCurrentPage(1);
+                }}
+                className="px-2 py-0.5 rounded bg-black/40 border border-amber-500/25 hover:border-amber-400 text-[11px]"
+              >
+                {stats.metadataAlerts.invalidTmdb} sem TMDB ID
+              </button>
+            )}
+            {stats.metadataAlerts.missingSource > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  setFilterDiagnostic('NO_SOURCE');
+                  setCurrentPage(1);
+                }}
+                className="px-2 py-0.5 rounded bg-black/40 border border-amber-500/25 hover:border-amber-400 text-[11px]"
+              >
+                {stats.metadataAlerts.missingSource} sem fonte
+              </button>
+            )}
+          </div>
+          {filterDiagnostic !== 'all' && (
+            <button
+              type="button"
+              onClick={() => {
+                setFilterDiagnostic('all');
+                setCurrentPage(1);
+              }}
+              className="text-[11px] font-bold text-zinc-300 hover:text-white underline"
+            >
+              Limpar filtro de alerta
+            </button>
+          )}
+        </div>
+      )}
+
       {/* INTEGRITY VERIFICATION STRIP (DB vs API vs UI) */}
       {audit && (
         <div className="bg-zinc-950/90 border border-white/10 rounded-2xl px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 text-[11px] font-mono tabular-nums">
@@ -931,7 +1091,7 @@ export const CatalogManager: React.FC<CatalogManagerProps> = ({
             <span className="text-zinc-400">
               Integridade BD:{' '}
               <strong className="text-white">
-                {dbSectionTotal.toLocaleString('pt-PT')} {isSeriesCatalog ? 'séries' : isMovieCatalog ? 'filmes' : 'itens'}
+                {dbSectionTotal.toLocaleString('pt-PT')} {isAnimeCatalog ? 'animes' : isDoramaCatalog ? 'doramas' : isSeriesCatalog ? 'séries' : isMovieCatalog ? 'filmes' : 'itens'}
               </strong>
             </span>
             <span className="text-zinc-700">|</span>
@@ -1064,6 +1224,22 @@ export const CatalogManager: React.FC<CatalogManagerProps> = ({
                 </select>
               </div>
             )}
+
+            <div>
+              <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Categoria Especial</label>
+              <select
+                value={filterCategory}
+                onChange={e => {
+                  setFilterCategory(e.target.value);
+                  setCurrentPage(1);
+                }}
+                className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-brand"
+              >
+                <option value="all">Todas (Filmes & Séries)</option>
+                <option value="anime">Animes</option>
+                <option value="dorama">Doramas</option>
+              </select>
+            </div>
 
             <div>
               <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">
@@ -1422,6 +1598,16 @@ export const CatalogManager: React.FC<CatalogManagerProps> = ({
                                 }`}
                               >
                                 {isSeries ? 'Série' : 'Filme'}
+                              </span>
+                            )}
+                            {Array.isArray(item.categories) && item.categories.includes('anime') && (
+                              <span className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/30 text-amber-300">
+                                Anime
+                              </span>
+                            )}
+                            {Array.isArray(item.categories) && item.categories.includes('dorama') && (
+                              <span className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded bg-rose-500/15 border border-rose-500/30 text-rose-300">
+                                Dorama
                               </span>
                             )}
                             {renderDiagnosticPill(item)}
@@ -1957,6 +2143,20 @@ export const CatalogManager: React.FC<CatalogManagerProps> = ({
                   </div>
                 </div>
 
+                {/* VERSÕES DE REPRODUÇÃO PERMANENTE PARA FILMES */}
+                {detailsItem.type === 'movie' && detailsItem.tmdbId > 0 && (
+                  <PlaybackVersionsManager
+                    tmdbId={detailsItem.tmdbId}
+                    contentType="movie"
+                    title={detailsItem.title}
+                    compact
+                    onUpdated={() => {
+                      openDetailsModal(detailsItem, false);
+                      fetchCatalogData();
+                    }}
+                  />
+                )}
+
                 {/* FONTES ASSOCIADAS */}
                 <div className="space-y-3 bg-black/40 p-4 rounded-2xl border border-white/10">
                   <div className="flex items-center justify-between gap-3">
@@ -2021,36 +2221,95 @@ export const CatalogManager: React.FC<CatalogManagerProps> = ({
                       </button>
                     </div>
 
+                    {detailsComparison && (
+                      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 bg-zinc-950/90 border border-white/10 rounded-xl p-3 text-xs tabular-nums">
+                        <div>
+                          <span className="text-[10px] text-zinc-500 uppercase block">Temporadas TMDB</span>
+                          <strong className="text-white">{detailsComparison.officialSeasonsCount}</strong>
+                        </div>
+                        <div>
+                          <span className="text-[10px] text-zinc-500 uppercase block">Esperados</span>
+                          <strong className="text-zinc-200">{detailsComparison.expectedEpisodes}</strong>
+                        </div>
+                        <div>
+                          <span className="text-[10px] text-zinc-500 uppercase block">Encontrados</span>
+                          <strong className="text-blue-400">{detailsComparison.foundEpisodes}</strong>
+                        </div>
+                        <div>
+                          <span className="text-[10px] text-zinc-500 uppercase block">Com Link</span>
+                          <strong className="text-emerald-400">{detailsComparison.withLink}</strong>
+                        </div>
+                        <div>
+                          <span className="text-[10px] text-zinc-500 uppercase block">Sem Link</span>
+                          <strong className="text-amber-400">{detailsComparison.withoutLink}</strong>
+                        </div>
+                        <div>
+                          <span className="text-[10px] text-zinc-500 uppercase block">Validados / Erro</span>
+                          <strong className="text-zinc-200">
+                            <span className="text-emerald-400">{detailsComparison.validatedCount}</span>
+                            {' / '}
+                            <span className="text-red-400">{detailsComparison.errorCount}</span>
+                          </strong>
+                        </div>
+                      </div>
+                    )}
+
                     {detailsItem.seasons && detailsItem.seasons.length > 0 ? (
                       <>
                         <div className="flex flex-wrap gap-2">
-                          {(detailsItem.seasons as SeasonWithSources[]).map(s => (
-                            <button
-                              key={s.seasonNumber}
-                              onClick={() => setSelectedSeasonNum(s.seasonNumber)}
-                              className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition-all ${
-                                selectedSeasonNum === s.seasonNumber
-                                  ? 'bg-purple-600 border-purple-500 text-white'
-                                  : 'bg-zinc-950 border-zinc-800 text-zinc-400 hover:text-white'
-                              }`}
-                            >
-                              {s.name || `T${s.seasonNumber}`} ({s.episodes?.length || s.episodeCount || 0})
-                            </button>
-                          ))}
+                          {(detailsItem.seasons as SeasonWithSources[])
+                            .slice()
+                            .sort((a, b) => Number(a.seasonNumber) - Number(b.seasonNumber))
+                            .map(s => {
+                              const cmpSeason = detailsComparison?.seasons?.find(
+                                cs => Number(cs.seasonNumber) === Number(s.seasonNumber)
+                              );
+                              return (
+                                <button
+                                  key={s.seasonNumber}
+                                  onClick={() => {
+                                    setSelectedSeasonNum(s.seasonNumber);
+                                    setDetailsEpPage(1);
+                                  }}
+                                  className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition-all ${
+                                    selectedSeasonNum === s.seasonNumber
+                                      ? 'bg-purple-600 border-purple-500 text-white'
+                                      : 'bg-zinc-950 border-zinc-800 text-zinc-400 hover:text-white'
+                                  }`}
+                                >
+                                  {s.seasonNumber === 0 ? 'Especiais (T0)' : s.name || `T${s.seasonNumber}`} (
+                                  {s.episodes?.length || s.episodeCount || 0}
+                                  {cmpSeason && cmpSeason.expectedEpisodes > (s.episodes?.length || 0)
+                                    ? `/${cmpSeason.expectedEpisodes}`
+                                    : ''}
+                                  )
+                                </button>
+                              );
+                            })}
                         </div>
 
                         {(() => {
                           const currentSeason = (detailsItem.seasons as SeasonWithSources[]).find(
                             s => s.seasonNumber === selectedSeasonNum
                           );
+                          const cmpSeason = detailsComparison?.seasons?.find(
+                            cs => Number(cs.seasonNumber) === Number(selectedSeasonNum)
+                          );
                           const episodes = currentSeason?.episodes || [];
                           if (!currentSeason) return null;
+
+                          const PAGE_SIZE = 25;
+                          const totalEpPages = Math.max(1, Math.ceil(episodes.length / PAGE_SIZE));
+                          const safeEpPage = Math.min(detailsEpPage, totalEpPages);
+                          const visibleEps = detailsShowAllEps
+                            ? episodes
+                            : episodes.slice((safeEpPage - 1) * PAGE_SIZE, safeEpPage * PAGE_SIZE);
 
                           if (episodes.length === 0) {
                             return (
                               <div className="p-6 text-center bg-zinc-950 rounded-2xl border border-zinc-800 space-y-3">
                                 <p className="text-zinc-400 text-xs">
-                                  Episódios desta temporada ainda não foram hidratados localmente ({currentSeason.episodeCount || 0} previstos no TMDB).
+                                  Episódios desta temporada ainda não foram hidratados localmente ({currentSeason.episodeCount || cmpSeason?.expectedEpisodes || 0} previstos no TMDB).
                                 </p>
                                 <button
                                   onClick={() => handleSyncSeasonEpisodes(currentSeason.seasonNumber)}
@@ -2069,50 +2328,182 @@ export const CatalogManager: React.FC<CatalogManagerProps> = ({
                           }
 
                           return (
-                            <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
-                              {episodes.map(ep => (
-                                <div
-                                  key={`${currentSeason.seasonNumber}-${ep.episodeNumber}`}
-                                  className="p-3 bg-zinc-950 border border-zinc-800 rounded-xl flex items-center justify-between gap-3"
-                                >
-                                  <div className="min-w-0 flex-1">
-                                    <div className="flex items-center gap-2">
-                                      <span className="px-1.5 py-0.5 rounded bg-purple-950 text-purple-300 font-mono text-[10px] font-bold">
-                                        E{String(ep.episodeNumber).padStart(2, '0')}
-                                      </span>
-                                      <p className="font-bold text-white truncate">{ep.title}</p>
-                                    </div>
-                                    <p className="text-[10px] text-zinc-500 mt-0.5">
-                                      {ep.duration ? `${ep.duration} min · ` : ''}
-                                      {ep.airDate || 'Sem data'}
-                                    </p>
-                                  </div>
-                                  <div className="flex items-center gap-2 shrink-0">
-                                    <span
-                                      className={`px-2 py-0.5 rounded-full text-[9px] font-bold border ${
-                                        (ep.sourcesCount || 0) > 0
-                                          ? 'bg-emerald-950/70 text-emerald-400 border-emerald-800'
-                                          : 'bg-zinc-900 text-zinc-400 border-zinc-700'
-                                      }`}
-                                    >
-                                      {(ep.sourcesCount || 0) > 0
-                                        ? `${ep.sourcesCount} fonte(s) · ${ep.sourceStatus || 'OK'}`
-                                        : 'Sem fonte'}
-                                    </span>
-                                    {onOpenSources && (
-                                      <button
-                                        onClick={() => {
-                                          setDetailsModalOpen(false);
-                                          onOpenSources(detailsItem, currentSeason.seasonNumber, ep.episodeNumber);
-                                        }}
-                                        className="px-2.5 py-1 bg-zinc-800 hover:bg-brand text-white rounded-lg text-[10px] font-bold flex items-center gap-1 transition-all"
-                                      >
-                                        <Play className="w-3 h-3" /> Fonte
-                                      </button>
+                            <div className="space-y-2.5">
+                              {cmpSeason && (
+                                <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-xl bg-zinc-950 border border-white/10 text-[11px] tabular-nums">
+                                  <div className="flex flex-wrap items-center gap-3 text-zinc-300">
+                                    <span>Esperados: <strong className="text-white">{cmpSeason.expectedEpisodes}</strong></span>
+                                    <span>Encontrados: <strong className="text-blue-400">{cmpSeason.foundEpisodes}</strong></span>
+                                    <span>Com link: <strong className="text-emerald-400">{cmpSeason.withLink}</strong></span>
+                                    <span>Sem link: <strong className="text-amber-400">{cmpSeason.withoutLink}</strong></span>
+                                    {cmpSeason.errorCount > 0 && (
+                                      <span>Com erro: <strong className="text-red-400">{cmpSeason.errorCount}</strong></span>
                                     )}
                                   </div>
+                                  {cmpSeason.difference > 0 && (
+                                    <span className="px-2 py-0.5 rounded bg-amber-500/15 border border-amber-500/30 text-amber-300 font-bold">
+                                      Diferença: -{cmpSeason.difference} por obter
+                                    </span>
+                                  )}
                                 </div>
-                              ))}
+                              )}
+
+                              {episodes.length > PAGE_SIZE && (
+                                <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-xl bg-zinc-950 border border-white/10 text-[11px] tabular-nums">
+                                  <span className="text-zinc-400">
+                                    {detailsShowAllEps
+                                      ? `Todos os ${episodes.length} episódios`
+                                      : `Página ${safeEpPage} de ${totalEpPages} (${episodes.length} episódios)`}
+                                  </span>
+                                  <div className="flex items-center gap-1.5">
+                                    {!detailsShowAllEps && (
+                                      <>
+                                        <button
+                                          type="button"
+                                          disabled={safeEpPage <= 1}
+                                          onClick={() => setDetailsEpPage(p => Math.max(1, p - 1))}
+                                          className="px-2 py-1 rounded bg-white/5 hover:bg-white/10 disabled:opacity-40"
+                                        >
+                                          Anterior
+                                        </button>
+                                        <button
+                                          type="button"
+                                          disabled={safeEpPage >= totalEpPages}
+                                          onClick={() => setDetailsEpPage(p => Math.min(totalEpPages, p + 1))}
+                                          className="px-2 py-1 rounded bg-white/5 hover:bg-white/10 disabled:opacity-40"
+                                        >
+                                          Seguinte
+                                        </button>
+                                      </>
+                                    )}
+                                    <button
+                                      type="button"
+                                      onClick={() => setDetailsShowAllEps(v => !v)}
+                                      className="px-2 py-1 rounded bg-white/10 hover:bg-white/15 font-bold text-white"
+                                    >
+                                      {detailsShowAllEps ? `Paginar (${PAGE_SIZE})` : 'Ver Todos'}
+                                    </button>
+                                  </div>
+                                </div>
+                              )}
+
+                              <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+                                {visibleEps.map(ep => {
+                                  const isEditingThisEp =
+                                    detailsVersionEpisode?.seasonNumber === currentSeason.seasonNumber &&
+                                    detailsVersionEpisode?.episodeNumber === ep.episodeNumber;
+                                  const dubStatus = ep.versionAvailability?.dublado?.status;
+                                  const legStatus = ep.versionAvailability?.legendado?.status;
+                                  return (
+                                    <div
+                                      key={`${currentSeason.seasonNumber}-${ep.episodeNumber}`}
+                                      className={`p-3 bg-zinc-950 border rounded-xl flex flex-wrap items-center justify-between gap-3 ${
+                                        isEditingThisEp ? 'border-[#E50914]' : 'border-zinc-800'
+                                      }`}
+                                    >
+                                      <div className="min-w-0 flex-1">
+                                        <div className="flex items-center gap-2">
+                                          <span className="px-1.5 py-0.5 rounded bg-purple-950 text-purple-300 font-mono text-[10px] font-bold">
+                                            E{String(ep.episodeNumber).padStart(2, '0')}
+                                          </span>
+                                          <p className="font-bold text-white truncate">{ep.title}</p>
+                                        </div>
+                                        <p className="text-[10px] text-zinc-500 mt-0.5">
+                                          {ep.duration ? `${ep.duration} min · ` : ''}
+                                          {ep.airDate || 'Sem data'}
+                                        </p>
+                                      </div>
+                                      <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                                        <span
+                                          className={`px-1.5 py-0.5 rounded text-[9px] font-black uppercase border ${
+                                            dubStatus === 'available'
+                                              ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700/60'
+                                              : dubStatus === 'unavailable'
+                                              ? 'bg-red-950/70 text-red-300 border-red-700/60'
+                                              : 'bg-zinc-900 text-zinc-500 border-zinc-800'
+                                          }`}
+                                          title={ep.versionAvailability?.dublado?.reason || 'Versão Dublada'}
+                                        >
+                                          DUB
+                                        </span>
+                                        <span
+                                          className={`px-1.5 py-0.5 rounded text-[9px] font-black uppercase border ${
+                                            legStatus === 'available'
+                                              ? 'bg-indigo-950/70 text-indigo-300 border-indigo-700/60'
+                                              : legStatus === 'unavailable'
+                                              ? 'bg-red-950/70 text-red-300 border-red-700/60'
+                                              : 'bg-zinc-900 text-zinc-500 border-zinc-800'
+                                          }`}
+                                          title={ep.versionAvailability?.legendado?.reason || 'Versão Legendada'}
+                                        >
+                                          LEG
+                                        </span>
+                                        <span
+                                          className={`px-2 py-0.5 rounded-full text-[9px] font-bold border ${
+                                            (ep.sourcesCount || 0) > 0
+                                              ? 'bg-emerald-950/70 text-emerald-400 border-emerald-800'
+                                              : 'bg-zinc-900 text-zinc-400 border-zinc-700'
+                                          }`}
+                                        >
+                                          {(ep.sourcesCount || 0) > 0
+                                            ? `${ep.sourcesCount} fonte(s)`
+                                            : 'Sem fonte'}
+                                        </span>
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            setDetailsVersionEpisode(
+                                              isEditingThisEp
+                                                ? null
+                                                : {
+                                                    seasonNumber: currentSeason.seasonNumber,
+                                                    episodeNumber: ep.episodeNumber,
+                                                    title: ep.title
+                                                  }
+                                            )
+                                          }
+                                          className={`px-2.5 py-1 rounded-lg text-[10px] font-bold flex items-center gap-1 transition-all ${
+                                            isEditingThisEp
+                                              ? 'bg-[#E50914] text-white'
+                                              : 'bg-zinc-800 hover:bg-zinc-700 text-white'
+                                          }`}
+                                        >
+                                          Versões
+                                        </button>
+                                        {onOpenSources && (
+                                          <button
+                                            onClick={() => {
+                                              setDetailsModalOpen(false);
+                                              onOpenSources(detailsItem, currentSeason.seasonNumber, ep.episodeNumber);
+                                            }}
+                                            className="px-2.5 py-1 bg-zinc-800 hover:bg-brand text-white rounded-lg text-[10px] font-bold flex items-center gap-1 transition-all"
+                                          >
+                                            <Play className="w-3 h-3" /> Fonte
+                                          </button>
+                                        )}
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+
+                              {detailsVersionEpisode && detailsItem.tmdbId > 0 && (
+                                <div className="pt-2">
+                                  <PlaybackVersionsManager
+                                    tmdbId={detailsItem.tmdbId}
+                                    contentType="tv"
+                                    title={detailsItem.title}
+                                    seasonNumber={detailsVersionEpisode.seasonNumber}
+                                    episodeNumber={detailsVersionEpisode.episodeNumber}
+                                    episodeTitle={detailsVersionEpisode.title}
+                                    compact
+                                    onUpdated={() => {
+                                      openDetailsModal(detailsItem, false, detailsVersionEpisode.seasonNumber);
+                                      fetchCatalogData();
+                                    }}
+                                  />
+                                </div>
+                              )}
                             </div>
                           );
                         })()}
@@ -2158,7 +2549,7 @@ export const CatalogManager: React.FC<CatalogManagerProps> = ({
       {/* MODAL DE EDIÇÃO */}
       {editingItem && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto">
-          <div className="bg-zinc-900 border border-zinc-800 rounded-3xl max-w-2xl w-full p-6 sm:p-8 space-y-6 max-h-[90vh] overflow-y-auto my-auto shadow-2xl">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-3xl max-w-4xl w-full p-6 sm:p-8 space-y-6 max-h-[92vh] overflow-y-auto my-auto shadow-2xl">
             <div className="flex items-center justify-between border-b border-zinc-800 pb-4">
               <h3 className="text-lg font-bold text-white uppercase tracking-wider flex items-center gap-2">
                 <Edit className="w-5 h-5 text-amber-400" />
@@ -2263,6 +2654,41 @@ export const CatalogManager: React.FC<CatalogManagerProps> = ({
                 />
               </div>
 
+              <div>
+                <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block mb-1.5">
+                  Categorias do Catálogo (sem duplicação)
+                </label>
+                <div className="flex flex-wrap gap-3">
+                  {(['anime', 'dorama'] as const).map(cat => {
+                    const checked = Array.isArray(editingItem.categories) && editingItem.categories.includes(cat);
+                    return (
+                      <label
+                        key={cat}
+                        className={`px-3 py-2 rounded-xl border text-xs font-bold cursor-pointer flex items-center gap-2 transition-colors ${
+                          checked
+                            ? 'bg-brand/15 border-brand text-white'
+                            : 'bg-zinc-950 border-zinc-800 text-zinc-400 hover:text-white'
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={e => {
+                            const current = Array.isArray(editingItem.categories) ? editingItem.categories : [];
+                            const next = e.target.checked
+                              ? Array.from(new Set([...current, cat]))
+                              : current.filter(c => c !== cat);
+                            setEditingItem({ ...editingItem, categories: next });
+                          }}
+                          className="rounded border-zinc-700 bg-zinc-900 text-brand"
+                        />
+                        <span className="uppercase">{cat === 'anime' ? 'Animes' : 'Doramas'}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">
@@ -2302,12 +2728,104 @@ export const CatalogManager: React.FC<CatalogManagerProps> = ({
                   Sinopse
                 </label>
                 <textarea
-                  rows={4}
+                  rows={3}
                   value={editingItem.overview || ''}
                   onChange={e => setEditingItem({ ...editingItem, overview: e.target.value })}
                   className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-3.5 text-white focus:outline-none focus:border-brand"
                 />
               </div>
+
+              {/* SECÇÃO PERMANENTE: VERSÕES DE REPRODUÇÃO (DUBLADA E LEGENDADA) */}
+              {editingItem.tmdbId > 0 && (
+                <div className="space-y-3 pt-2 border-t border-zinc-800">
+                  {(editingItem.type === 'tv' || editingItem.type === 'series') && (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-zinc-950 border border-zinc-800 rounded-2xl p-3.5">
+                      <div>
+                        <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">
+                          Temporada do Episódio
+                        </label>
+                        {((editDetailedItem?.seasons || editingItem.seasons || []).length > 0) ? (
+                          <select
+                            value={editVersionSeason}
+                            onChange={e => {
+                              const nextS = parseInt(e.target.value, 10) || 1;
+                              setEditVersionSeason(nextS);
+                              const seasonObj = (editDetailedItem?.seasons || editingItem.seasons || []).find(
+                                s => Number(s.seasonNumber) === nextS
+                              );
+                              const firstEp = seasonObj?.episodes?.[0];
+                              setEditVersionEpisode(firstEp ? Number(firstEp.episodeNumber) : 1);
+                            }}
+                            className="w-full bg-zinc-900 border border-zinc-700 rounded-xl px-3 py-2 text-xs text-white"
+                          >
+                            {(editDetailedItem?.seasons || editingItem.seasons || [])
+                              .slice()
+                              .sort((a, b) => Number(a.seasonNumber) - Number(b.seasonNumber))
+                              .map(s => (
+                                <option key={s.seasonNumber} value={s.seasonNumber}>
+                                  {s.seasonNumber === 0 ? 'Especiais (T0)' : s.name || `Temporada ${s.seasonNumber}`}
+                                </option>
+                              ))}
+                          </select>
+                        ) : (
+                          <input
+                            type="number"
+                            min={0}
+                            value={editVersionSeason}
+                            onChange={e => setEditVersionSeason(Math.max(0, parseInt(e.target.value, 10) || 0))}
+                            className="w-full bg-zinc-900 border border-zinc-700 rounded-xl px-3 py-2 text-xs text-white"
+                          />
+                        )}
+                      </div>
+                      <div>
+                        <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">
+                          Episódio
+                        </label>
+                        {(() => {
+                          const seasonObj = (editDetailedItem?.seasons || editingItem.seasons || []).find(
+                            s => Number(s.seasonNumber) === Number(editVersionSeason)
+                          );
+                          const eps = seasonObj?.episodes || [];
+                          if (eps.length > 0) {
+                            return (
+                              <select
+                                value={editVersionEpisode}
+                                onChange={e => setEditVersionEpisode(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                                className="w-full bg-zinc-900 border border-zinc-700 rounded-xl px-3 py-2 text-xs text-white"
+                              >
+                                {eps.map(ep => (
+                                  <option key={ep.episodeNumber} value={ep.episodeNumber}>
+                                    E{String(ep.episodeNumber).padStart(2, '0')} — {ep.title}
+                                  </option>
+                                ))}
+                              </select>
+                            );
+                          }
+                          return (
+                            <input
+                              type="number"
+                              min={1}
+                              value={editVersionEpisode}
+                              onChange={e => setEditVersionEpisode(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                              className="w-full bg-zinc-900 border border-zinc-700 rounded-xl px-3 py-2 text-xs text-white"
+                            />
+                          );
+                        })()}
+                      </div>
+                    </div>
+                  )}
+
+                  <PlaybackVersionsManager
+                    tmdbId={editingItem.tmdbId}
+                    contentType={editingItem.type === 'tv' || editingItem.type === 'series' ? 'tv' : 'movie'}
+                    title={editingItem.title}
+                    seasonNumber={editVersionSeason}
+                    episodeNumber={editVersionEpisode}
+                    compact
+                    onUpdated={() => fetchCatalogData()}
+                  />
+                </div>
+              )}
 
               <div className="flex gap-3 pt-4 border-t border-zinc-800">
                 <button

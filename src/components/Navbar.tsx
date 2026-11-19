@@ -9,10 +9,11 @@ import {
   ChevronDown,
   Heart,
   Clock,
-  Code2,
-  KeyRound
+  KeyRound,
+  Activity
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.js';
+import { api, CATALOG_UPDATED_EVENT } from '../lib/api.js';
 
 export const Navbar: React.FC = () => {
   const {
@@ -30,13 +31,36 @@ export const Navbar: React.FC = () => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showSearchInput, setShowSearchInput] = useState(false);
+  const [apiStatus, setApiStatus] = useState<'Online' | 'Maintenance' | 'Offline'>('Online');
   const searchInputRef = useRef<HTMLInputElement>(null);
   const userMenuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const handleScroll = () => setIsScrolled(window.scrollY > 25);
-    window.addEventListener('scroll', handleScroll);
+    const handleScroll = () => setIsScrolled(window.scrollY > 20);
+    window.addEventListener('scroll', handleScroll, { passive: true });
     return () => window.removeEventListener('scroll', handleScroll);
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    const loadStatus = () => {
+      api.getPublicStats()
+        .then((res) => {
+          if (!mounted) return;
+          if (res?.status === 'Maintenance') setApiStatus('Maintenance');
+          else setApiStatus('Online');
+        })
+        .catch(() => {
+          if (mounted) setApiStatus('Offline');
+        });
+    };
+    loadStatus();
+    const onUpdated = () => loadStatus();
+    window.addEventListener(CATALOG_UPDATED_EVENT, onUpdated);
+    return () => {
+      mounted = false;
+      window.removeEventListener(CATALOG_UPDATED_EVENT, onUpdated);
+    };
   }, []);
 
   useEffect(() => {
@@ -53,11 +77,10 @@ export const Navbar: React.FC = () => {
     { id: 'home', label: 'Início' },
     { id: 'movies', label: 'Filmes' },
     { id: 'series', label: 'Séries' },
-    { id: 'developer', label: 'Portal Dev' },
-    { id: 'documentation', label: 'API Docs' },
-    { id: 'playground', label: 'Playground' },
-    { id: 'plans', label: 'Planos' },
-    { id: 'resources', label: 'SDK' }
+    { id: 'animes', label: 'Animes' },
+    { id: 'doramas', label: 'Doramas' },
+    { id: 'documentation', label: 'Docs API' },
+    { id: 'developer', label: 'Portal Dev' }
   ];
 
   const handleSearchSubmit = (e: React.FormEvent) => {
@@ -70,7 +93,7 @@ export const Navbar: React.FC = () => {
   const handleSearchIconClick = () => {
     if (!showSearchInput) {
       setShowSearchInput(true);
-      setTimeout(() => searchInputRef.current?.focus(), 100);
+      setTimeout(() => searchInputRef.current?.focus(), 80);
     } else if (searchQuery.trim()) {
       navigateTo('search');
     } else {
@@ -78,43 +101,57 @@ export const Navbar: React.FC = () => {
     }
   };
 
+  const statusColor =
+    apiStatus === 'Online'
+      ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20'
+      : apiStatus === 'Maintenance'
+        ? 'text-amber-400 bg-amber-500/10 border-amber-500/20'
+        : 'text-red-400 bg-red-500/10 border-red-500/20';
+
+  const statusDot =
+    apiStatus === 'Online'
+      ? 'bg-emerald-400'
+      : apiStatus === 'Maintenance'
+        ? 'bg-amber-400'
+        : 'bg-red-500';
+
   return (
     <header
       className={`fixed top-0 left-0 right-0 z-50 transition-all duration-200 ${
         isScrolled
-          ? 'bg-[#080808]/95 backdrop-blur-md border-b border-white/10 py-2.5 shadow-lg'
-          : 'bg-[#080808]/80 backdrop-blur-md border-b border-white/5 py-3'
+          ? 'bg-[#080808]/95 backdrop-blur-md border-b border-white/[0.08] py-2.5 shadow-lg shadow-black/40'
+          : 'bg-[#080808]/85 backdrop-blur-md border-b border-white/[0.05] py-3'
       }`}
     >
       <div className="max-w-[1600px] mx-auto px-3 sm:px-6 md:px-8">
-        <div className="flex items-center justify-between gap-3 sm:gap-5">
+        <div className="flex items-center justify-between gap-2 sm:gap-4">
           {/* BRAND LOGO */}
           <button
             type="button"
             onClick={() => navigateTo('home')}
             className="flex items-center gap-2 shrink-0 group focus:outline-none"
           >
-            <div className="w-8 h-8 rounded-lg bg-[#E50914] flex items-center justify-center shadow-md shadow-[#E50914]/20 group-hover:scale-105 transition-transform">
+            <div className="w-8 h-8 rounded-lg bg-[#E50914] flex items-center justify-center shadow-md shadow-[#E50914]/25 group-hover:scale-105 transition-transform">
               <span className="text-white font-black text-base tracking-tighter font-display">R</span>
             </div>
-            <span className="text-base sm:text-lg font-black tracking-tight text-white font-display uppercase">
+            <span className="text-base sm:text-lg font-black tracking-tight text-white font-display uppercase whitespace-nowrap">
               RONYCINE <span className="text-[#E50914] text-xs font-black tracking-widest ml-0.5">API</span>
             </span>
           </button>
 
           {/* DESKTOP NAVIGATION */}
-          <nav className="hidden xl:flex items-center gap-1">
+          <nav className="hidden lg:flex items-center gap-0.5 xl:gap-1" aria-label="Navegação principal">
             {navLinks.map((link) => {
-              const isActive = activeView === link.id;
+              const isActive = activeView === link.id || (link.id === 'documentation' && activeView === 'docs');
               return (
                 <button
                   key={link.id}
                   type="button"
                   onClick={() => navigateTo(link.id)}
-                  className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors whitespace-nowrap ${
+                  className={`px-2.5 xl:px-3 py-1.5 text-xs font-semibold rounded-md transition-colors whitespace-nowrap ${
                     isActive
-                      ? 'text-white bg-[#E50914]/15 border border-[#E50914]/30'
-                      : 'text-zinc-400 hover:text-white hover:bg-white/5 border border-transparent'
+                      ? 'text-white bg-[#E50914]/15 border border-[#E50914]/35'
+                      : 'text-zinc-400 hover:text-white hover:bg-white/[0.05] border border-transparent'
                   }`}
                 >
                   {link.label}
@@ -124,20 +161,20 @@ export const Navbar: React.FC = () => {
           </nav>
 
           {/* ACTIONS & CONTROLS */}
-          <div className="flex items-center gap-2 sm:gap-2.5 shrink-0">
+          <div className="flex items-center gap-2 shrink-0">
             {/* SEARCH BAR */}
             <form onSubmit={handleSearchSubmit} className="relative flex items-center">
               <div
-                className={`flex items-center bg-black/60 border border-white/10 rounded-full transition-all duration-200 overflow-hidden ${
+                className={`flex items-center bg-black/60 border border-white/10 rounded-lg transition-all duration-200 overflow-hidden ${
                   showSearchInput
-                    ? 'w-44 sm:w-56 px-3 py-1.5 border-[#E50914]/50'
-                    : 'w-8 h-8 sm:w-9 sm:h-9 justify-center bg-transparent border-transparent hover:bg-white/5'
+                    ? 'w-40 sm:w-56 px-2.5 py-1.5 border-[#E50914]/50'
+                    : 'w-8 h-8 justify-center bg-transparent border-transparent hover:bg-white/[0.06]'
                 }`}
               >
                 <button
                   type="button"
                   onClick={handleSearchIconClick}
-                  className="text-zinc-300 hover:text-white shrink-0 p-1"
+                  className="text-zinc-300 hover:text-white shrink-0 p-0.5"
                   aria-label="Pesquisar"
                 >
                   <Search className="w-4 h-4" />
@@ -147,7 +184,7 @@ export const Navbar: React.FC = () => {
                   <input
                     ref={searchInputRef}
                     type="text"
-                    placeholder="Buscar filmes, séries..."
+                    placeholder="Buscar título, TMDB ID..."
                     value={searchQuery}
                     onChange={(e) => {
                       setSearchQuery(e.target.value);
@@ -164,15 +201,28 @@ export const Navbar: React.FC = () => {
               </div>
             </form>
 
-            {/* QUICK PORTAL BUTTON ON DESKTOP */}
+            {/* REAL API STATUS */}
             <button
               type="button"
-              onClick={() => navigateTo('developer')}
-              className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-semibold text-zinc-200 transition-colors"
+              onClick={() => navigateTo('status')}
+              title="Estado em tempo real da RONYCINE API"
+              className={`hidden md:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-[11px] font-semibold transition-colors whitespace-nowrap ${statusColor}`}
             >
-              <Code2 className="w-3.5 h-3.5 text-[#E50914]" />
-              <span>Console Dev</span>
+              <span className={`w-1.5 h-1.5 rounded-full ${statusDot}`} />
+              <span>API {apiStatus === 'Online' ? 'Online' : apiStatus === 'Maintenance' ? 'Manutenção' : 'Offline'}</span>
             </button>
+
+            {/* ROLE-BASED ADMIN ACCESS */}
+            {user && (isAdmin || isFounder) && (
+              <button
+                type="button"
+                onClick={() => navigateTo('admin')}
+                className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-white/[0.06] hover:bg-[#E50914]/15 border border-white/10 hover:border-[#E50914]/40 text-xs font-semibold text-zinc-100 transition-colors whitespace-nowrap"
+              >
+                <Shield className="w-3.5 h-3.5 text-[#E50914]" />
+                <span>Admin</span>
+              </button>
+            )}
 
             {/* USER PROFILE / LOGIN */}
             {user ? (
@@ -180,19 +230,19 @@ export const Navbar: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setShowUserMenu(!showUserMenu)}
-                  className="flex items-center gap-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-full pl-1.5 pr-2.5 py-1 transition-all"
+                  className="flex items-center gap-1.5 bg-white/[0.05] hover:bg-white/[0.1] border border-white/10 rounded-lg pl-1.5 pr-2 py-1 transition-all"
                 >
-                  <div className="w-6 h-6 rounded-full bg-[#E50914] text-white flex items-center justify-center text-xs font-bold">
+                  <div className="w-6 h-6 rounded-md bg-[#E50914] text-white flex items-center justify-center text-xs font-bold">
                     {isFounder ? 'R' : user.name ? user.name.charAt(0).toUpperCase() : <User className="w-3.5 h-3.5" />}
                   </div>
-                  <span className="text-xs font-medium text-zinc-200 hidden sm:inline max-w-[100px] truncate">
+                  <span className="text-xs font-medium text-zinc-200 hidden sm:inline max-w-[90px] truncate">
                     {isFounder ? 'Fundador' : user.name || 'Conta'}
                   </span>
                   <ChevronDown className={`w-3.5 h-3.5 text-zinc-400 transition-transform ${showUserMenu ? 'rotate-180' : ''}`} />
                 </button>
 
                 {showUserMenu && (
-                  <div className="absolute right-0 top-full mt-2 w-60 bg-[#121216] border border-white/10 rounded-xl shadow-2xl py-1.5 z-50 text-xs">
+                  <div className="absolute right-0 top-full mt-2 w-60 bg-[#111216] border border-white/10 rounded-xl shadow-2xl py-1.5 z-50 text-xs">
                     <div className="px-3.5 py-2.5 border-b border-white/5">
                       <p className="font-bold text-white truncate">{user.name || 'Usuário RONYCINE'}</p>
                       <p className="text-[11px] text-zinc-400 truncate">{user.email}</p>
@@ -228,6 +278,15 @@ export const Navbar: React.FC = () => {
                         <span>Painel Administrativo</span>
                       </button>
                     )}
+
+                    <button
+                      type="button"
+                      onClick={() => { setShowUserMenu(false); navigateTo('status'); }}
+                      className="w-full flex items-center gap-2.5 px-3.5 py-2 text-zinc-300 hover:text-white hover:bg-white/5 transition-colors text-left"
+                    >
+                      <Activity className="w-4 h-4 text-emerald-400" />
+                      <span>Estado da API</span>
+                    </button>
 
                     <button
                       type="button"
@@ -273,7 +332,7 @@ export const Navbar: React.FC = () => {
               <button
                 type="button"
                 onClick={() => navigateTo('login')}
-                className="px-4 py-1.5 bg-[#E50914] hover:bg-[#b80710] text-white text-xs font-bold uppercase tracking-wider rounded-md transition-all active:scale-95 shadow"
+                className="px-3.5 py-1.5 bg-[#E50914] hover:bg-[#b80710] text-white text-xs font-bold uppercase tracking-wider rounded-md transition-all active:scale-95 shadow"
               >
                 Entrar
               </button>
@@ -283,7 +342,7 @@ export const Navbar: React.FC = () => {
             <button
               type="button"
               onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-              className="xl:hidden p-1.5 rounded-md text-zinc-300 hover:text-white hover:bg-white/5"
+              className="lg:hidden p-1.5 rounded-md text-zinc-300 hover:text-white hover:bg-white/5"
               aria-label="Abrir menu"
             >
               {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
@@ -294,8 +353,8 @@ export const Navbar: React.FC = () => {
 
       {/* MOBILE DROPDOWN MENU */}
       {mobileMenuOpen && (
-        <div className="xl:hidden bg-[#0D0D10] border-b border-white/10 px-4 py-3 space-y-1 shadow-2xl">
-          {navLinks.map((link) => {
+        <div className="lg:hidden bg-[#0B0C10] border-b border-white/10 px-4 py-3 space-y-1 shadow-2xl">
+          {[...navLinks, { id: 'playground', label: 'Playground' }, { id: 'plans', label: 'Planos' }, { id: 'status', label: 'Estado da API' }].map((link) => {
             const isActive = activeView === link.id;
             return (
               <button
@@ -315,6 +374,19 @@ export const Navbar: React.FC = () => {
               </button>
             );
           })}
+          {user && (isAdmin || isFounder) && (
+            <button
+              type="button"
+              onClick={() => {
+                setMobileMenuOpen(false);
+                navigateTo('admin');
+              }}
+              className="w-full text-left px-3 py-2 text-xs font-bold rounded-md bg-white/[0.06] text-white flex items-center gap-2 mt-1"
+            >
+              <Shield className="w-3.5 h-3.5 text-[#E50914]" />
+              <span>Painel Administrativo</span>
+            </button>
+          )}
         </div>
       )}
     </header>

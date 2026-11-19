@@ -322,9 +322,20 @@ export const RecoveryCenterView: React.FC<RecoveryCenterViewProps> = ({ onStatsU
     }
   };
 
-  // 6. Backup Download
-  const handleDownloadBackup = () => {
-    window.open('/api/admin/recovery/backup/download', '_blank');
+  // 6. Backup Download (mobile Chrome + desktop compatible via signed token)
+  const handleDownloadBackup = async () => {
+    try {
+      const res = await api.getRecoveryBackupDownloadToken();
+      api.triggerSignedFileDownload(
+        res.downloadUrl,
+        `ronycine-catalog-backup-${new Date().toISOString().slice(0, 10)}.json`
+      );
+    } catch (err: any) {
+      setBackupFeedback({
+        type: 'error',
+        message: err?.message || 'Erro ao gerar link de download do backup.'
+      });
+    }
   };
 
   // 7. Smart Backup Parser & Structure Detection
@@ -658,7 +669,7 @@ export const RecoveryCenterView: React.FC<RecoveryCenterViewProps> = ({ onStatsU
     // Fetch existing catalog items to build lookup map for preview statistics
     const existingTmdbMap = new Map<string, boolean>();
     try {
-      const catalogRes = await api.getCatalog({ limit: 10000 });
+      const catalogRes = await api.getCatalog({ limit: 100000 });
       if (catalogRes && Array.isArray(catalogRes.items)) {
         catalogRes.items.forEach((item: any) => {
           if (item.tmdbId && item.type) {

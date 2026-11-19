@@ -2,6 +2,8 @@ import dns from 'node:dns/promises';
 import net from 'node:net';
 import { classifySourceUrl } from '../lib/sourceClassification.js';
 import { RecommendedPlaybackMode, SourceDiagnostics, SourceKind, SourceStatus, VideoFormatType } from '../types.js';
+import { resolveCuevanaProviderPage } from './providerAdapters.js';
+import { detectQualityFromUrlOrMetadata, extractQualitiesFromHlsManifest } from '../lib/videoQualityUtils.js';
 
 export interface ProbeOptions {
   timeoutMs?: number;
@@ -102,15 +104,17 @@ export async function validatePublicHttpUrl(
     return { safe: true, parsed };
   }
 
-  // Resolve DNS records to guard against DNS rebinding / private A/AAAA records
+  // Resolve DNS records with a bounded 1200ms timeout to guard against DNS rebinding without stalling saves
   try {
-    const records = await dns.lookup(host, { all: true });
-    if (!records || records.length === 0) {
-      return { safe: false, reason: 'Não foi possível resolver o domínio informado.' };
-    }
-    for (const rec of records) {
-      if (isPrivateOrReservedIp(rec.address)) {
-        return { safe: false, reason: 'Domínio resolve para endereço IP privado ou reservado (bloqueio SSRF).' };
+    const records = await Promise.race<Array<{ address: string }> | null>([
+      dns.lookup(host, { all: true }),
+      new Promise<null>(resolve => setTimeout(() => resolve(null), 1200))
+    ]);
+    if (records && records.length > 0) {
+      for (const rec of records) {
+        if (isPrivateOrReservedIp(rec.address)) {
+          return { safe: false, reason: 'Domínio resolve para endereço IP privado ou reservado (bloqueio SSRF).' };
+        }
       }
     }
   } catch {
@@ -183,8 +187,11 @@ function parseFramePolicy(headers: Headers): {
   };
 }
 
-async function readBoundedTextSnippet(response: Response, maxBytes = 4096): Promise<string> {
-  if (!response.body) return '';
+async function readBoundedSnippet(
+  response: Response,
+  maxBytes = 4096
+): Promise<{ buffer: Buffer; text: string }> {
+  if (!response.body) return { buffer: Buffer.alloc(0), text: '' };
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -204,8 +211,49 @@ async function readBoundedTextSnippet(response: Response, maxBytes = 4096): Prom
     } catch {}
   }
 
-  const merged = Buffer.concat(chunks.map(c => Buffer.from(c)));
-  return merged.toString('utf-8').slice(0, maxBytes);
+  const merged = Buffer.concat(chunks.map(c => Buffer.from(c))).subarray(0, maxBytes);
+  return {
+    buffer: merged,
+    text: merged.toString('utf-8')
+  };
+}
+
+function detectFormatFromMagicOrDisposition(
+  buffer: Buffer,
+  text: string,
+  contentDisposition: string | null
+): 'mp4' | 'webm' | 'm3u8' | 'dash' | null {
+  const disp = (contentDisposition || '').toLowerCase();
+  if (disp.includes('.mp4') || disp.includes('.m4v')) return 'mp4';
+  if (disp.includes('.webm')) return 'webm';
+  if (disp.includes('.m3u8')) return 'm3u8';
+  if (disp.includes('.mpd')) return 'dash';
+
+  if (buffer.length >= 8) {
+    const headerSlice = buffer.subarray(0, 64);
+    if (
+      headerSlice.includes(Buffer.from('ftyp')) ||
+      headerSlice.subarray(4, 8).toString('ascii') === 'moov' ||
+      headerSlice.subarray(4, 8).toString('ascii') === 'mdat' ||
+      headerSlice.subarray(4, 8).toString('ascii') === 'free'
+    ) {
+      return 'mp4';
+    }
+    if (
+      buffer[0] === 0x1a &&
+      buffer[1] === 0x45 &&
+      buffer[2] === 0xdf &&
+      buffer[3] === 0xa3
+    ) {
+      return 'webm';
+    }
+  }
+
+  const trimmed = text.trimStart();
+  if (trimmed.startsWith('#EXTM3U')) return 'm3u8';
+  if (trimmed.includes('<MPD')) return 'dash';
+
+  return null;
 }
 
 async function fetchWithValidatedRedirects(
@@ -217,7 +265,7 @@ async function fetchWithValidatedRedirects(
   finalUrl: string;
   redirectChain: string[];
 }> {
-  const timeoutMs = options.timeoutMs ?? 7000;
+  const timeoutMs = options.timeoutMs ?? 12000;
   const maxRedirects = options.maxRedirects ?? 5;
   const redirectChain: string[] = [];
   let currentUrl = initialUrl;
@@ -317,6 +365,33 @@ export async function probeVideoSource(rawUrl: string, options: ProbeOptions = {
     };
   }
 
+  const baseSteps: NonNullable<SourceDiagnostics['diagnosticSteps']> = [
+    { step: '1. Validar URL', status: 'ok', detail: `URL válida (${classified.originalUrl})` },
+    {
+      step: '2. Identificar formato/origem',
+      status: 'info',
+      detail: `Classificação inicial: ${classified.sourceKind}${classified.providerName ? ` · Fornecedor: ${classified.providerName}` : ''}`
+    }
+  ];
+
+  // Provider-specific inspection (e.g., Cuevana detail pages without MGEB prefix)
+  const providerAdapter = await resolveCuevanaProviderPage(classified.normalizedUrl, {
+    timeoutMs: options.timeoutMs ?? 10000
+  });
+  if (providerAdapter?.handled) {
+    return {
+      success: providerAdapter.supported,
+      accessible: providerAdapter.supported,
+      status: providerAdapter.status,
+      sourceKind: providerAdapter.sourceKind,
+      detectedFormat: providerAdapter.detectedFormat,
+      originalUrl: classified.originalUrl,
+      finalUrl: providerAdapter.embedUrl || classified.originalUrl,
+      message: providerAdapter.message,
+      diagnostics: providerAdapter.diagnostics
+    };
+  }
+
   try {
     // 1. Controlled HEAD probe
     let probe = await fetchWithValidatedRedirects(classified.normalizedUrl, 'HEAD', options);
@@ -332,9 +407,11 @@ export async function probeVideoSource(rawUrl: string, options: ProbeOptions = {
       headStatus === 400 ||
       headStatus === 403 ||
       !headContentType ||
+      headContentType.includes('octet-stream') ||
       headContentType.includes('mpegurl') ||
       headContentType.includes('dash+xml') ||
       headContentType.includes('text/html') ||
+      headContentType.includes('text/plain') ||
       classified.sourceKind === 'PHP_VIDEO_ENDPOINT'
     ) {
       if (probe.response.body) {
@@ -348,12 +425,14 @@ export async function probeVideoSource(rawUrl: string, options: ProbeOptions = {
     const httpStatus = res.status;
     const rawContentType = res.headers.get('content-type') || '';
     const mimeType = rawContentType.split(';')[0].trim().toLowerCase();
+    const contentDisposition = res.headers.get('content-disposition');
     const contentLengthHeader = res.headers.get('content-length');
     const contentLength = contentLengthHeader ? parseInt(contentLengthHeader, 10) : null;
     const acceptRanges = res.headers.get('accept-ranges');
     const framePolicy = parseFramePolicy(res.headers);
 
     let snippet = '';
+    let snippetBuffer: Buffer = Buffer.alloc(0);
     if (
       usedGetFallback &&
       res.body &&
@@ -362,12 +441,29 @@ export async function probeVideoSource(rawUrl: string, options: ProbeOptions = {
         mimeType.includes('xml') ||
         mimeType.includes('json') ||
         mimeType === '' ||
-        mimeType === 'application/octet-stream')
+        mimeType === 'application/octet-stream' ||
+        mimeType.startsWith('video/'))
     ) {
-      snippet = await readBoundedTextSnippet(res, 4096);
+      const readRes = await readBoundedSnippet(res, 4096);
+      snippet = readRes.text;
+      snippetBuffer = readRes.buffer;
     } else if (res.body) {
       res.body.cancel().catch(() => {});
     }
+
+    const magicDetected = detectFormatFromMagicOrDisposition(snippetBuffer, snippet, contentDisposition);
+    const cleanedSnippet = snippet.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    const isUpstreamErrorBody =
+      !magicDetected &&
+      (mimeType.includes('text/plain') || mimeType.includes('text/html') || mimeType === '') &&
+      /falha ao baixar|bloqueio de rede|cloudflare|attention required|just a moment|access denied|file not found|video not found/i.test(
+        cleanedSnippet.slice(0, 600)
+      );
+
+    const qualityDetection = detectQualityFromUrlOrMetadata(probe.finalUrl || classified.originalUrl);
+    const availableQualities = snippet.includes('#EXTM3U')
+      ? extractQualitiesFromHlsManifest(snippet)
+      : qualityDetection.availableQualities;
 
     const baseDiagnostics: SourceDiagnostics = {
       ...classified.diagnostics,
@@ -380,24 +476,59 @@ export async function probeVideoSource(rawUrl: string, options: ProbeOptions = {
       xFrameOptions: framePolicy.xFrameOptions,
       cspFrameAncestors: framePolicy.cspFrameAncestors,
       embedAllowed: framePolicy.embedAllowed,
+      externalPageUrl: classified.sourceKind === 'WEB_PAGE' ? (probe.finalUrl || classified.originalUrl) : classified.diagnostics.externalPageUrl,
+      maxDetectedResolution: qualityDetection.maxDetectedResolution,
+      availableQualities,
+      analysisStatus: 'identified',
       testedAt
     };
 
     // HTTP error responses (4xx / 5xx)
     if (httpStatus >= 400) {
-      const reason =
-        httpStatus === 401 || httpStatus === 403
-          ? `HTTP ${httpStatus} — O servidor recusou o acesso.`
+      const isForbiddenOrBlocked = httpStatus === 401 || httpStatus === 403;
+      const isWebPageOrEmbedBlocked = isForbiddenOrBlocked && (classified.sourceKind === 'WEB_PAGE' || !framePolicy.embedAllowed);
+      const reason = isWebPageOrEmbedBlocked
+        ? `HTTP ${httpStatus} — O fornecedor recusou o acesso direto e bloqueia incorporação externa (${framePolicy.xFrameOptions || framePolicy.cspFrameAncestors || 'proteção Cloudflare/WAF'}).`
+        : isForbiddenOrBlocked
+          ? `HTTP ${httpStatus} — O servidor recusou o acesso direto.`
           : httpStatus === 404 || httpStatus === 410
             ? `HTTP ${httpStatus} — Conteúdo não encontrado no servidor de origem.`
             : `HTTP ${httpStatus} — Erro retornado pelo servidor de origem.`;
 
+      const verificationLabel = isWebPageOrEmbedBlocked ? 'INCORPORAÇÃO NÃO PERMITIDA' : 'ERRO DE REDE';
+      return {
+        success: false,
+        accessible: false,
+        status: isWebPageOrEmbedBlocked ? 'embed_blocked' : 'offline',
+        sourceKind: classified.sourceKind,
+        detectedFormat: classified.sourceKind === 'WEB_PAGE' ? 'html' : classified.suggestedFormat,
+        originalUrl: classified.originalUrl,
+        finalUrl: probe.finalUrl,
+        message: reason,
+        diagnostics: {
+          ...baseDiagnostics,
+          directPlayable: false,
+          recommendedPlaybackMode: isWebPageOrEmbedBlocked ? 'blocked' : 'unknown',
+          failureReason: reason,
+          verificationLabel,
+          diagnosticSteps: [
+            ...baseSteps,
+            { step: '3. Testar disponibilidade', status: 'error', detail: reason }
+          ]
+        }
+      };
+    }
+
+    // Upstream proxy / MGEB plain-text or HTML error (even with HTTP 200)
+    if (isUpstreamErrorBody && classified.sourceKind === 'PHP_VIDEO_ENDPOINT') {
+      const snippetPreview = cleanedSnippet.slice(0, 140);
+      const reason = `O servidor intermediário retornou um erro em vez de vídeo: "${snippetPreview}"`;
       return {
         success: false,
         accessible: false,
         status: 'offline',
-        sourceKind: classified.sourceKind,
-        detectedFormat: classified.suggestedFormat,
+        sourceKind: 'PHP_VIDEO_ENDPOINT',
+        detectedFormat: 'html',
         originalUrl: classified.originalUrl,
         finalUrl: probe.finalUrl,
         message: reason,
@@ -405,12 +536,17 @@ export async function probeVideoSource(rawUrl: string, options: ProbeOptions = {
           ...baseDiagnostics,
           directPlayable: false,
           recommendedPlaybackMode: 'unknown',
-          failureReason: reason
+          failureReason: reason,
+          verificationLabel: 'ERRO DE REDE',
+          diagnosticSteps: [
+            ...baseSteps,
+            { step: '3. Verificar fluxo devolvido', status: 'error', detail: reason }
+          ]
         }
       };
     }
 
-    // 2. Inspect real MIME / body snippet
+    // 2. Inspect real MIME / body snippet / magic bytes
     const finalPathname = (() => {
       try {
         return new URL(probe.finalUrl).pathname.toLowerCase();
@@ -419,14 +555,19 @@ export async function probeVideoSource(rawUrl: string, options: ProbeOptions = {
       }
     })();
 
-    // A) Direct MP4
+    // A) Direct MP4 (MIME, extension, Content-Disposition, or binary ftyp atom)
     if (
       mimeType === 'video/mp4' ||
       mimeType === 'video/m4v' ||
+      magicDetected === 'mp4' ||
       (mimeType === 'application/octet-stream' && finalPathname.endsWith('.mp4'))
     ) {
       const detectedKind: SourceKind =
         classified.sourceKind === 'PHP_VIDEO_ENDPOINT' ? 'PHP_VIDEO_ENDPOINT' : 'DIRECT_MP4';
+      const msg =
+        detectedKind === 'PHP_VIDEO_ENDPOINT'
+          ? 'Endpoint PHP devolveu fluxo de vídeo MP4 compatível.'
+          : 'Vídeo MP4 direto verificado e acessível.';
       return {
         success: true,
         accessible: true,
@@ -435,15 +576,18 @@ export async function probeVideoSource(rawUrl: string, options: ProbeOptions = {
         detectedFormat: 'mp4',
         originalUrl: classified.originalUrl,
         finalUrl: probe.finalUrl,
-        message:
-          detectedKind === 'PHP_VIDEO_ENDPOINT'
-            ? 'Endpoint PHP devolveu fluxo de vídeo MP4 compatível.'
-            : 'Vídeo MP4 direto verificado e acessível.',
+        message: msg,
         diagnostics: {
           ...baseDiagnostics,
           directPlayable: true,
           recommendedPlaybackMode: 'html5_mp4',
-          failureReason: null
+          failureReason: null,
+          verificationLabel: 'REPRODUÇÃO SUPORTADA',
+          diagnosticSteps: [
+            ...baseSteps,
+            { step: '3. Resposta HTTP', status: 'ok', detail: `HTTP ${httpStatus} · ${rawContentType || 'video/mp4'}` },
+            { step: '4. Compatibilidade', status: 'ok', detail: msg }
+          ]
         }
       };
     }
@@ -451,10 +595,15 @@ export async function probeVideoSource(rawUrl: string, options: ProbeOptions = {
     // B) Direct WebM
     if (
       mimeType === 'video/webm' ||
+      magicDetected === 'webm' ||
       (mimeType === 'application/octet-stream' && finalPathname.endsWith('.webm'))
     ) {
       const detectedKind: SourceKind =
         classified.sourceKind === 'PHP_VIDEO_ENDPOINT' ? 'PHP_VIDEO_ENDPOINT' : 'DIRECT_WEBM';
+      const msg =
+        detectedKind === 'PHP_VIDEO_ENDPOINT'
+          ? 'Endpoint PHP devolveu vídeo WebM compatível.'
+          : 'Vídeo WebM direto verificado e acessível.';
       return {
         success: true,
         accessible: true,
@@ -463,15 +612,18 @@ export async function probeVideoSource(rawUrl: string, options: ProbeOptions = {
         detectedFormat: 'webm',
         originalUrl: classified.originalUrl,
         finalUrl: probe.finalUrl,
-        message:
-          detectedKind === 'PHP_VIDEO_ENDPOINT'
-            ? 'Endpoint PHP devolveu vídeo WebM compatível.'
-            : 'Vídeo WebM direto verificado e acessível.',
+        message: msg,
         diagnostics: {
           ...baseDiagnostics,
           directPlayable: true,
           recommendedPlaybackMode: 'html5_webm',
-          failureReason: null
+          failureReason: null,
+          verificationLabel: 'REPRODUÇÃO SUPORTADA',
+          diagnosticSteps: [
+            ...baseSteps,
+            { step: '3. Resposta HTTP', status: 'ok', detail: `HTTP ${httpStatus} · ${rawContentType || 'video/webm'}` },
+            { step: '4. Compatibilidade', status: 'ok', detail: msg }
+          ]
         }
       };
     }
@@ -479,10 +631,15 @@ export async function probeVideoSource(rawUrl: string, options: ProbeOptions = {
     // C) HLS / M3U8
     if (
       mimeType.includes('mpegurl') ||
+      magicDetected === 'm3u8' ||
       snippet.trimStart().startsWith('#EXTM3U')
     ) {
       const detectedKind: SourceKind =
         classified.sourceKind === 'PHP_VIDEO_ENDPOINT' ? 'PHP_VIDEO_ENDPOINT' : 'DIRECT_HLS';
+      const msg =
+        detectedKind === 'PHP_VIDEO_ENDPOINT'
+          ? 'Endpoint devolveu manifesto HLS (M3U8) válido para reprodução direta.'
+          : 'Manifesto HLS (M3U8) verificado com sucesso.';
       return {
         success: true,
         accessible: true,
@@ -491,15 +648,18 @@ export async function probeVideoSource(rawUrl: string, options: ProbeOptions = {
         detectedFormat: 'm3u8',
         originalUrl: classified.originalUrl,
         finalUrl: probe.finalUrl,
-        message:
-          detectedKind === 'PHP_VIDEO_ENDPOINT'
-            ? 'Endpoint PHP devolveu manifesto HLS (M3U8) válido.'
-            : 'Manifesto HLS (M3U8) verificado com sucesso.',
+        message: msg,
         diagnostics: {
           ...baseDiagnostics,
           directPlayable: true,
           recommendedPlaybackMode: 'hls',
-          failureReason: null
+          failureReason: null,
+          verificationLabel: 'REPRODUÇÃO SUPORTADA',
+          diagnosticSteps: [
+            ...baseSteps,
+            { step: '3. Resposta HTTP', status: 'ok', detail: `HTTP ${httpStatus} · ${rawContentType || 'application/vnd.apple.mpegurl'}` },
+            { step: '4. Manifesto HLS', status: 'ok', detail: 'Assinatura #EXTM3U confirmada; pronto para hls.js.' }
+          ]
         }
       };
     }
@@ -512,6 +672,10 @@ export async function probeVideoSource(rawUrl: string, options: ProbeOptions = {
     ) {
       const detectedKind: SourceKind =
         classified.sourceKind === 'PHP_VIDEO_ENDPOINT' ? 'PHP_VIDEO_ENDPOINT' : 'DIRECT_DASH';
+      const msg =
+        detectedKind === 'PHP_VIDEO_ENDPOINT'
+          ? 'Endpoint devolveu manifesto DASH (.mpd) válido.'
+          : 'Manifesto DASH (.mpd) verificado com sucesso.';
       return {
         success: true,
         accessible: true,
@@ -520,23 +684,24 @@ export async function probeVideoSource(rawUrl: string, options: ProbeOptions = {
         detectedFormat: 'dash',
         originalUrl: classified.originalUrl,
         finalUrl: probe.finalUrl,
-        message:
-          detectedKind === 'PHP_VIDEO_ENDPOINT'
-            ? 'Endpoint PHP devolveu manifesto DASH (.mpd) válido.'
-            : 'Manifesto DASH (.mpd) verificado com sucesso.',
+        message: msg,
         diagnostics: {
           ...baseDiagnostics,
           directPlayable: true,
           recommendedPlaybackMode: 'dash',
-          failureReason: null
+          failureReason: null,
+          verificationLabel: 'REPRODUÇÃO SUPORTADA',
+          diagnosticSteps: [
+            ...baseSteps,
+            { step: '3. Resposta HTTP', status: 'ok', detail: `HTTP ${httpStatus} · ${rawContentType || 'application/dash+xml'}` },
+            { step: '4. Manifesto DASH', status: 'ok', detail: msg }
+          ]
         }
       };
     }
 
     // E) HTML Page / PHP returning text/html
     if (mimeType.includes('text/html') || mimeType.includes('application/xhtml') || snippet.toLowerCase().includes('<html')) {
-      const isPhpOrEmbed =
-        classified.sourceKind === 'PHP_VIDEO_ENDPOINT' || classified.sourceKind === 'EMBED_PLAYER';
       const resolvedKind: SourceKind =
         classified.sourceKind === 'PHP_VIDEO_ENDPOINT'
           ? 'PHP_VIDEO_ENDPOINT'
@@ -545,6 +710,7 @@ export async function probeVideoSource(rawUrl: string, options: ProbeOptions = {
             : 'WEB_PAGE';
 
       if (!framePolicy.embedAllowed) {
+        const blockReason = `Servidor retornou text/html com restrição de incorporação (${framePolicy.xFrameOptions || framePolicy.cspFrameAncestors || 'frame-ancestors'}).`;
         return {
           success: false,
           accessible: true,
@@ -558,35 +724,52 @@ export async function probeVideoSource(rawUrl: string, options: ProbeOptions = {
             ...baseDiagnostics,
             directPlayable: false,
             recommendedPlaybackMode: 'blocked',
-            failureReason: `Servidor retornou text/html com restrição de iframe (${framePolicy.xFrameOptions || framePolicy.cspFrameAncestors || 'frame-ancestors'}).`
+            failureReason: blockReason,
+            externalPageUrl: probe.finalUrl || classified.originalUrl,
+            verificationLabel: 'INCORPORAÇÃO NÃO PERMITIDA',
+            diagnosticSteps: [
+              ...baseSteps,
+              { step: '3. Resposta HTTP', status: 'warn', detail: `HTTP ${httpStatus} · ${rawContentType || 'text/html'}` },
+              { step: '4. Política de Iframe', status: 'error', detail: blockReason }
+            ]
           }
         };
       }
 
-      if (resolvedKind === 'WEB_PAGE') {
-        // An arbitrary external webpage is NOT automatically a playable video stream
+      if (resolvedKind === 'WEB_PAGE' || resolvedKind === 'PHP_VIDEO_ENDPOINT') {
         const hasVideoTag = /<video[\s>]|<iframe[\s>]/i.test(snippet);
-        if (!hasVideoTag) {
+        if (!hasVideoTag || resolvedKind === 'WEB_PAGE') {
+          const htmlReason =
+            resolvedKind === 'PHP_VIDEO_ENDPOINT'
+              ? `O endpoint devolveu HTML sem fluxo de vídeo compatível (${cleanedSnippet.slice(0, 120) || 'sem stream'}).`
+              : 'O endereço devolveu uma página HTML informativa (text/html) e não um fluxo direto MP4/HLS/DASH ou embed oficial.';
           return {
             success: false,
             accessible: true,
             status: 'unsupported_format',
-            sourceKind: 'WEB_PAGE',
+            sourceKind: resolvedKind,
             detectedFormat: 'html',
             originalUrl: classified.originalUrl,
             finalUrl: probe.finalUrl,
-            message: 'A fonte devolveu uma página HTML sem fluxo de vídeo direto compatível.',
+            message: htmlReason,
             diagnostics: {
               ...baseDiagnostics,
               directPlayable: false,
               recommendedPlaybackMode: 'unsupported',
-              failureReason: 'O endereço devolveu text/html (página web) e não um fluxo de vídeo MP4/HLS/DASH.'
+              failureReason: htmlReason,
+              externalPageUrl: probe.finalUrl || classified.originalUrl,
+              verificationLabel: 'FONTE INCOMPATÍVEL',
+              diagnosticSteps: [
+                ...baseSteps,
+                { step: '3. Resposta HTTP', status: 'warn', detail: `HTTP ${httpStatus} · ${rawContentType || 'text/html'}` },
+                { step: '4. Compatibilidade', status: 'error', detail: htmlReason }
+              ]
             }
           };
         }
       }
 
-      // PHP endpoint or Embed player returning embeddable HTML — HTTP 200 HTML does not confirm video playback!
+      // Authorized Embed player returning embeddable HTML with video/player markup
       const hasEmbeddedMediaTag = /<video[\s>]|<iframe[\s>]|source\s+src=|hls\.js|jwplayer|plyr|videojs/i.test(snippet);
       return {
         success: hasEmbeddedMediaTag,
@@ -597,7 +780,7 @@ export async function probeVideoSource(rawUrl: string, options: ProbeOptions = {
         originalUrl: classified.originalUrl,
         finalUrl: probe.finalUrl,
         message: hasEmbeddedMediaTag
-          ? 'Player incorporado compatível detetado (Iframe; não é vídeo MP4 direto).'
+          ? 'Player incorporado compatível detetado (Iframe).'
           : 'Não foi possível confirmar a reprodução automaticamente. A fonte necessita de teste no player.',
         diagnostics: {
           ...baseDiagnostics,
@@ -605,7 +788,12 @@ export async function probeVideoSource(rawUrl: string, options: ProbeOptions = {
           recommendedPlaybackMode: 'iframe',
           failureReason: hasEmbeddedMediaTag
             ? null
-            : 'O servidor devolveu HTTP 200 em HTML, sem confirmação automática de fluxo de vídeo direto.'
+            : 'O servidor devolveu HTTP 200 em HTML, sem confirmação automática de fluxo de vídeo direto.',
+          verificationLabel: hasEmbeddedMediaTag ? 'REPRODUÇÃO SUPORTADA' : 'FORMATO IDENTIFICADO',
+          diagnosticSteps: [
+            ...baseSteps,
+            { step: '3. Resposta HTTP', status: 'ok', detail: `HTTP ${httpStatus} · HTML embeddable` }
+          ]
         }
       };
     }
@@ -625,12 +813,47 @@ export async function probeVideoSource(rawUrl: string, options: ProbeOptions = {
           ...baseDiagnostics,
           directPlayable: true,
           recommendedPlaybackMode: 'html5_mp4',
-          failureReason: null
+          failureReason: null,
+          verificationLabel: 'REPRODUÇÃO SUPORTADA',
+          diagnosticSteps: [
+            ...baseSteps,
+            { step: '3. Resposta HTTP', status: 'ok', detail: `HTTP ${httpStatus} · ${rawContentType}` }
+          ]
         }
       };
     }
 
-    // G) Unsupported Content-Type (JSON error, plain text, image, etc.)
+    // G) Binary octet-stream on PHP endpoint or CDN without explicit Content-Type text error -> needs browser playback test
+    if (
+      (mimeType === 'application/octet-stream' || mimeType === '') &&
+      (classified.sourceKind === 'PHP_VIDEO_ENDPOINT' ||
+        classified.sourceKind === 'DIRECT_MP4' ||
+        classified.sourceKind === 'DIRECT_WEBM')
+    ) {
+      return {
+        success: true,
+        accessible: true,
+        status: 'unverifiable',
+        sourceKind: classified.sourceKind,
+        detectedFormat: classified.suggestedFormat,
+        originalUrl: classified.originalUrl,
+        finalUrl: probe.finalUrl,
+        message: 'Stream binário detetado sem cabeçalho MIME explícito; pronto para teste no player.',
+        diagnostics: {
+          ...baseDiagnostics,
+          directPlayable: true,
+          recommendedPlaybackMode: classified.sourceKind === 'DIRECT_WEBM' ? 'html5_webm' : 'html5_mp4',
+          failureReason: null,
+          verificationLabel: 'FORMATO IDENTIFICADO',
+          diagnosticSteps: [
+            ...baseSteps,
+            { step: '3. Resposta HTTP', status: 'info', detail: `HTTP ${httpStatus} · ${rawContentType || 'binário'}` }
+          ]
+        }
+      };
+    }
+
+    // H) Unsupported Content-Type (JSON error, plain text, image, etc.)
     const unsupportedReason = mimeType
       ? `A fonte não devolveu um formato de vídeo compatível (Content-Type: ${mimeType}).`
       : 'O servidor não informou um Content-Type de vídeo compatível.';
@@ -648,7 +871,12 @@ export async function probeVideoSource(rawUrl: string, options: ProbeOptions = {
         ...baseDiagnostics,
         directPlayable: false,
         recommendedPlaybackMode: 'unsupported',
-        failureReason: unsupportedReason
+        failureReason: unsupportedReason,
+        verificationLabel: 'FONTE INCOMPATÍVEL',
+        diagnosticSteps: [
+          ...baseSteps,
+          { step: '3. Compatibilidade', status: 'error', detail: unsupportedReason }
+        ]
       }
     };
   } catch (err: any) {

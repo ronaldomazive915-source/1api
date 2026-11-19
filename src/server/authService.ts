@@ -136,8 +136,13 @@ export function createPlaybackToken(
   const payload: PlaybackTokenPayload = {
     contentId: Number(input.contentId),
     mediaType: input.mediaType === 'tv' ? 'tv' : 'movie',
-    season: input.mediaType === 'tv' ? Number(input.season || 1) : undefined,
-    episode: input.mediaType === 'tv' ? Number(input.episode || 1) : undefined,
+    season:
+      input.mediaType === 'tv'
+        ? input.season !== undefined && input.season !== null && !isNaN(Number(input.season))
+          ? Math.max(0, Number(input.season))
+          : 1
+        : undefined,
+    episode: input.mediaType === 'tv' ? Math.max(1, Number(input.episode || 1)) : undefined,
     appId: input.appId,
     keyId: input.keyId,
     allowedDomains: Array.isArray(input.allowedDomains) ? input.allowedDomains : [],

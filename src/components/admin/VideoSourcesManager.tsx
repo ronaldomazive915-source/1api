@@ -24,7 +24,12 @@ import {
   Star,
   FileCode,
   Power,
-  Tv
+  Tv,
+  ChevronDown,
+  ChevronRight,
+  FolderTree,
+  List,
+  Subtitles
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { api } from '../../lib/api.js';
@@ -40,7 +45,17 @@ import { resolveTmdbPosterUrl } from '../../lib/mediaUtils.js';
 import { MgebUrlField } from './MgebUrlField.js';
 import { EpisodeGenerator } from './EpisodeGenerator.js';
 import { MovieSourcePanel } from './MovieSourcePanel.js';
+import { PlaybackVersionsManager } from './PlaybackVersionsManager.js';
 import { buildMgebUrl, stripMgebPrefix } from '../../lib/mgebUtils.js';
+import {
+  AUDIO_LANGUAGE_OPTIONS,
+  SOURCE_QUALITY_OPTIONS,
+  VERSION_TYPE_OPTIONS,
+  formatSourceOrganizedLabel,
+  formatVersionTypeLabel,
+  isPresetAudioLanguage,
+  normalizeVersionType
+} from '../../lib/sourceMetadata.js';
 
 export interface PreselectedSourceMedia {
   contentId: number;
@@ -75,14 +90,26 @@ export const VideoSourcesManager: React.FC<VideoSourcesManagerProps> = ({
   const [filterType, setFilterType] = useState<'all' | 'movie' | 'tv'>('all');
   const [filterStatus, setFilterStatus] = useState<string>('all');
   const [catalogItems, setCatalogItems] = useState<MediaItem[]>([]);
+  const [viewMode, setViewMode] = useState<'organized' | 'table'>('organized');
+  const [expandedSeries, setExpandedSeries] = useState<Record<string, boolean>>({});
+  const [expandedSeasons, setExpandedSeasons] = useState<Record<string, boolean>>({});
   const [isVerifying, setIsVerifying] = useState(false);
   const [verifyingId, setVerifyingId] = useState<string | null>(null);
 
   // Diagnostic & Play Test Modals
   const [diagnosticSource, setDiagnosticSource] = useState<VideoSource | null>(null);
   const [playTestSource, setPlayTestSource] = useState<VideoSource | null>(null);
+  const [playTestDiag, setPlayTestDiag] = useState<{
+    status: 'playing' | 'confirmed' | 'format_error' | 'connection_error';
+    message: string;
+  }>({ status: 'playing', message: 'A inicializar reprodução de teste...' });
   const [modalTestingLink, setModalTestingLink] = useState(false);
   const [modalTestMessage, setModalTestMessage] = useState<string | null>(null);
+
+  const openPlayTest = (src: VideoSource) => {
+    setPlayTestDiag({ status: 'playing', message: 'A inicializar reprodução de teste...' });
+    setPlayTestSource(src);
+  };
 
   // Modal TMDB Search State
   const [tmdbQuery, setTmdbQuery] = useState('');
@@ -94,6 +121,7 @@ export const VideoSourcesManager: React.FC<VideoSourcesManagerProps> = ({
   // Form Save Feedback State
   const [savingStatus, setSavingStatus] = useState<'idle' | 'saving' | 'success' | 'error'>('idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [duplicateConflict, setDuplicateConflict] = useState<VideoSource | null>(null);
 
   // Provider Config State
   const [uqloadApiKey, setUqloadApiKey] = useState<string>('');
@@ -117,11 +145,14 @@ export const VideoSourcesManager: React.FC<VideoSourcesManagerProps> = ({
         setCurrentSource({
           contentId: preselectedMedia.contentId,
           contentType: preselectedMedia.contentType,
-          seasonNumber: preselectedMedia.contentType === 'tv' ? preselectedMedia.seasonNumber || 1 : undefined,
-          episodeNumber: preselectedMedia.contentType === 'tv' ? preselectedMedia.episodeNumber || 1 : undefined,
+          seasonNumber: preselectedMedia.contentType === 'tv' ? (preselectedMedia.seasonNumber ?? 1) : undefined,
+          episodeNumber: preselectedMedia.contentType === 'tv' ? (preselectedMedia.episodeNumber ?? 1) : undefined,
           selectedTitle: preselectedMedia.title,
           selectedPoster: preselectedMedia.posterPath,
           audioLanguage: 'Português',
+          versionType: 'dublado',
+          subtitleUrl: '',
+          subtitleLanguage: '',
           quality: '1080p',
           status: 'registered',
           format: 'php_endpoint',
@@ -143,7 +174,7 @@ export const VideoSourcesManager: React.FC<VideoSourcesManagerProps> = ({
     try {
       const [sourcesRes, catalogRes] = await Promise.all([
         api.getVideoSources(),
-        api.getCatalog({ limit: 1000 })
+        api.getCatalog({ limit: 100000 })
       ]);
       setSources(Array.isArray(sourcesRes) ? sourcesRes : []);
       setCatalogItems(catalogRes.items || []);
@@ -205,6 +236,9 @@ export const VideoSourcesManager: React.FC<VideoSourcesManagerProps> = ({
       serverName: prev?.serverName || 'Servidor Principal',
       format: prev?.format || 'embed',
       audioLanguage: prev?.audioLanguage || 'Português',
+      versionType: prev?.versionType || 'dublado',
+      subtitleUrl: prev?.subtitleUrl || '',
+      subtitleLanguage: prev?.subtitleLanguage || '',
       quality: prev?.quality || '1080p',
       status: prev?.status || 'registered'
     }));
@@ -214,6 +248,9 @@ export const VideoSourcesManager: React.FC<VideoSourcesManagerProps> = ({
 
   // URL paste classification (NEVER strip outer URL or ?url= parameter!)
   const handleUrlChange = (rawUrl: string) => {
+    setDuplicateConflict(null);
+    setErrorMessage(null);
+    if (savingStatus === 'error') setSavingStatus('idle');
     const classified = classifySourceUrl(rawUrl);
     const currentName = currentSource?.serverName || '';
     const shouldAutoName =
@@ -311,8 +348,7 @@ export const VideoSourcesManager: React.FC<VideoSourcesManagerProps> = ({
     }
   };
 
-  const handleSaveSource = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const performSaveSource = async (replaceExisting = false) => {
     if (!currentSource) return;
 
     if (!currentSource.contentId) {
@@ -342,15 +378,21 @@ export const VideoSourcesManager: React.FC<VideoSourcesManagerProps> = ({
 
     setSavingStatus('saving');
     setErrorMessage(null);
+    setDuplicateConflict(null);
 
-    const payload: Partial<VideoSource> = {
+    const payload: Partial<VideoSource> & { replaceExisting?: boolean } = {
       ...currentSource,
       url: classified.originalUrl,
       originalUrl: classified.originalUrl,
       sourceKind: currentSource.sourceKind || classified.sourceKind,
       format: currentSource.format || classified.suggestedFormat,
+      audioLanguage: currentSource.audioLanguage?.trim() || 'Português',
+      versionType: currentSource.versionType || 'dublado',
+      subtitleUrl: currentSource.subtitleUrl?.trim() ? currentSource.subtitleUrl.trim() : currentSource.id ? '' : undefined,
+      subtitleLanguage: currentSource.subtitleLanguage?.trim() ? currentSource.subtitleLanguage.trim() : currentSource.id ? '' : undefined,
       status: currentSource.status || 'registered',
-      diagnostics: currentSource.diagnostics || classified.diagnostics
+      diagnostics: currentSource.diagnostics || classified.diagnostics,
+      ...(replaceExisting ? { replaceExisting: true } : {})
     };
 
     try {
@@ -365,14 +407,32 @@ export const VideoSourcesManager: React.FC<VideoSourcesManagerProps> = ({
         setShowModal(false);
         setCurrentSource(null);
         setModalTestMessage(null);
+        setDuplicateConflict(null);
         setSavingStatus('idle');
         loadData();
       }, 900);
     } catch (err: any) {
-      console.error('Failed to save source:', err);
-      setErrorMessage(err.message || 'Erro ao salvar fonte.');
+      const isDuplicate =
+        err?.code === 'DUPLICATE_SOURCE' ||
+        err?.status === 409 ||
+        String(err?.message || '').includes('Já existe uma fonte igual');
+      if (isDuplicate) {
+        setDuplicateConflict(err?.existingSource || ({} as VideoSource));
+        setErrorMessage(
+          err?.existingSource?.serverName
+            ? `Esta URL já está registada no servidor "${err.existingSource.serverName}". Clique em "Substituir Fonte Existente" para atualizar.`
+            : err?.message || 'Já existe uma fonte igual registada para este conteúdo.'
+        );
+      } else {
+        setErrorMessage(err?.message || 'Erro ao salvar fonte.');
+      }
       setSavingStatus('error');
     }
+  };
+
+  const handleSaveSource = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await performSaveSource(false);
   };
 
   const handleDeleteSource = async (id: string) => {
@@ -434,16 +494,100 @@ export const VideoSourcesManager: React.FC<VideoSourcesManagerProps> = ({
   const safeSources = Array.isArray(sources) ? sources : [];
 
   const filteredSources = safeSources.filter(s => {
+    const media = catalogItems.find(
+      m => Number(m.tmdbId) === Number(s?.contentId) && (m.type === 'series' ? 'tv' : m.type) === (s?.contentType === 'series' ? 'tv' : s?.contentType)
+    );
+    const q = searchTerm.toLowerCase();
     const matchesSearch =
-      (s?.serverName || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+      !q ||
+      (s?.serverName || '').toLowerCase().includes(q) ||
       (s?.contentId || '').toString().includes(searchTerm) ||
-      (s?.originalUrl || s?.url || '').toLowerCase().includes(searchTerm.toLowerCase());
+      (s?.originalUrl || s?.url || '').toLowerCase().includes(q) ||
+      (media?.title || '').toLowerCase().includes(q) ||
+      formatSourceOrganizedLabel(s).toLowerCase().includes(q);
     const normalizedSourceType = s?.contentType === 'series' ? 'tv' : s?.contentType;
     const matchesType = filterType === 'all' || normalizedSourceType === filterType;
     const normalizedStatus = getStatusDisplayInfo(s?.status).code;
     const matchesStatus = filterStatus === 'all' || normalizedStatus === filterStatus;
     return matchesSearch && matchesType && matchesStatus;
   });
+
+  const organizedGroups = useMemo(() => {
+    const movieMap = new Map<number, { contentId: number; media?: MediaItem; sources: VideoSource[] }>();
+    const seriesMap = new Map<
+      number,
+      {
+        contentId: number;
+        media?: MediaItem;
+        totalSources: number;
+        seasons: Map<number, Map<number, VideoSource[]>>;
+      }
+    >();
+
+    const findMedia = (contentId: number, type: 'movie' | 'tv') =>
+      catalogItems.find(
+        m => Number(m.tmdbId) === Number(contentId) && (m.type === 'series' ? 'tv' : m.type) === type
+      );
+
+    for (const src of filteredSources) {
+      const normType = src.contentType === 'series' || src.contentType === 'tv' ? 'tv' : 'movie';
+      const cid = Number(src.contentId || 0);
+      if (normType === 'movie') {
+        let entry = movieMap.get(cid);
+        if (!entry) {
+          entry = { contentId: cid, media: findMedia(cid, 'movie'), sources: [] };
+          movieMap.set(cid, entry);
+        }
+        entry.sources.push(src);
+      } else {
+        let entry = seriesMap.get(cid);
+        if (!entry) {
+          entry = {
+            contentId: cid,
+            media: findMedia(cid, 'tv'),
+            totalSources: 0,
+            seasons: new Map()
+          };
+          seriesMap.set(cid, entry);
+        }
+        const sNum = Number(src.seasonNumber ?? 1);
+        const eNum = Number(src.episodeNumber ?? 1);
+        let epMap = entry.seasons.get(sNum);
+        if (!epMap) {
+          epMap = new Map();
+          entry.seasons.set(sNum, epMap);
+        }
+        const list = epMap.get(eNum) || [];
+        list.push(src);
+        epMap.set(eNum, list);
+        entry.totalSources += 1;
+      }
+    }
+
+    const movies = Array.from(movieMap.values()).sort((a, b) =>
+      (a.media?.title || `TMDB ${a.contentId}`).localeCompare(b.media?.title || `TMDB ${b.contentId}`)
+    );
+    const series = Array.from(seriesMap.values())
+      .map(s => ({
+        ...s,
+        seasonsList: Array.from(s.seasons.entries())
+          .sort((a, b) => a[0] - b[0])
+          .map(([seasonNumber, epMap]) => ({
+            seasonNumber,
+            episodes: Array.from(epMap.entries())
+              .sort((a, b) => a[0] - b[0])
+              .map(([episodeNumber, epSources]) => ({
+                episodeNumber,
+                sources: epSources
+              }))
+          }))
+      }))
+      .sort((a, b) =>
+        (a.media?.title || `TMDB ${a.contentId}`).localeCompare(b.media?.title || `TMDB ${b.contentId}`)
+      );
+
+    return { movies, series };
+  }, [filteredSources, catalogItems]);
 
   const getBadgeStyle = (status: string) => {
     const info = getStatusDisplayInfo(status);
@@ -486,6 +630,21 @@ export const VideoSourcesManager: React.FC<VideoSourcesManagerProps> = ({
     if (!currentSource?.url?.trim()) return null;
     return classifySourceUrl(currentSource.url);
   }, [currentSource?.url]);
+
+  const openEditModalForSource = (source: VideoSource) => {
+    const existingUrl = source.originalUrl || source.url || '';
+    const stripped = stripMgebPrefix(existingUrl);
+    setModalUseMgebPrefix(!existingUrl || stripped.hadPrefix);
+    setCurrentSource({
+      ...source,
+      versionType:
+        normalizeVersionType(source.versionType, source.serverName, source.audioLanguage) || 'dublado'
+    });
+    setModalTestMessage(null);
+    setErrorMessage(null);
+    setSavingStatus('idle');
+    setShowModal(true);
+  };
 
   return (
     <div className="space-y-8 pb-12 font-sans">
@@ -614,11 +773,14 @@ export const VideoSourcesManager: React.FC<VideoSourcesManagerProps> = ({
                     setCurrentSource({
                       contentId: preselectedMedia.contentId,
                       contentType: preselectedMedia.contentType,
-                      seasonNumber: preselectedMedia.contentType === 'tv' ? preselectedMedia.seasonNumber || 1 : undefined,
-                      episodeNumber: preselectedMedia.contentType === 'tv' ? preselectedMedia.episodeNumber || 1 : undefined,
+                      seasonNumber: preselectedMedia.contentType === 'tv' ? (preselectedMedia.seasonNumber ?? 1) : undefined,
+                      episodeNumber: preselectedMedia.contentType === 'tv' ? (preselectedMedia.episodeNumber ?? 1) : undefined,
                       selectedTitle: preselectedMedia.title,
                       selectedPoster: preselectedMedia.posterPath,
                       audioLanguage: 'Português',
+                      versionType: 'dublado',
+                      subtitleUrl: '',
+                      subtitleLanguage: '',
                       quality: '1080p',
                       status: 'registered',
                       format: 'php_endpoint',
@@ -645,6 +807,17 @@ export const VideoSourcesManager: React.FC<VideoSourcesManagerProps> = ({
                 </button>
               </div>
             </div>
+          )}
+
+          {preselectedMedia && (
+            <PlaybackVersionsManager
+              tmdbId={preselectedMedia.contentId}
+              contentType={preselectedMedia.contentType}
+              title={preselectedMedia.title}
+              seasonNumber={preselectedMedia.seasonNumber}
+              episodeNumber={preselectedMedia.episodeNumber}
+              onUpdated={loadData}
+            />
           )}
 
           {/* Action Header */}
@@ -685,11 +858,14 @@ export const VideoSourcesManager: React.FC<VideoSourcesManagerProps> = ({
                 setCurrentSource({
                   contentId: preselectedMedia?.contentId,
                   contentType: preselectedMedia?.contentType || 'movie',
-                  seasonNumber: preselectedMedia?.contentType === 'tv' ? preselectedMedia.seasonNumber || 1 : undefined,
-                  episodeNumber: preselectedMedia?.contentType === 'tv' ? preselectedMedia.episodeNumber || 1 : undefined,
+                  seasonNumber: preselectedMedia?.contentType === 'tv' ? (preselectedMedia.seasonNumber ?? 1) : undefined,
+                  episodeNumber: preselectedMedia?.contentType === 'tv' ? (preselectedMedia.episodeNumber ?? 1) : undefined,
                   selectedTitle: preselectedMedia?.title,
                   selectedPoster: preselectedMedia?.posterPath,
                   audioLanguage: 'Português',
+                  versionType: 'dublado',
+                  subtitleUrl: '',
+                  subtitleLanguage: '',
                   quality: '1080p',
                   status: 'registered',
                   format: 'php_endpoint',
@@ -747,7 +923,30 @@ export const VideoSourcesManager: React.FC<VideoSourcesManagerProps> = ({
                   className="w-full bg-black border border-white/10 rounded-2xl pl-12 pr-4 py-3 text-sm text-white focus:border-brand outline-none transition-all"
                 />
               </div>
-              <div className="flex items-center gap-3 w-full md:w-auto overflow-x-auto pb-2 md:pb-0 scrollbar-hide">
+              <div className="flex flex-wrap items-center gap-3 w-full md:w-auto">
+                <div className="flex bg-black rounded-2xl p-1 border border-white/10">
+                  <button
+                    type="button"
+                    onClick={() => setViewMode('organized')}
+                    className={`px-3.5 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-1.5 ${
+                      viewMode === 'organized' ? 'bg-brand text-white' : 'text-zinc-500 hover:text-zinc-300'
+                    }`}
+                  >
+                    <FolderTree className="w-3.5 h-3.5" />
+                    Organizado
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setViewMode('table')}
+                    className={`px-3.5 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-1.5 ${
+                      viewMode === 'table' ? 'bg-brand text-white' : 'text-zinc-500 hover:text-zinc-300'
+                    }`}
+                  >
+                    <List className="w-3.5 h-3.5" />
+                    Lista
+                  </button>
+                </div>
+
                 <div className="flex bg-black rounded-2xl p-1 border border-white/10">
                   {['all', 'movie', 'tv'].map(t => (
                     <button
@@ -779,6 +978,400 @@ export const VideoSourcesManager: React.FC<VideoSourcesManagerProps> = ({
               </div>
             </div>
 
+            {viewMode === 'organized' ? (
+              <div className="p-6 space-y-8">
+                {loading && filteredSources.length === 0 ? (
+                  <div className="p-12 text-center text-xs text-zinc-500">Carregando fontes registadas...</div>
+                ) : filteredSources.length === 0 ? (
+                  <div className="p-16 text-center text-zinc-600 flex flex-col items-center gap-3">
+                    <Layers className="w-10 h-10 opacity-20" />
+                    <p className="text-[10px] font-black uppercase tracking-[0.3em]">
+                      Nenhuma fonte de vídeo encontrada
+                    </p>
+                  </div>
+                ) : (
+                  <>
+                    {/* FILMES ORGANIZED (Idioma — Versão — Qualidade) */}
+                    {organizedGroups.movies.length > 0 && (
+                      <div className="space-y-4">
+                        <div className="flex items-center justify-between border-b border-white/10 pb-2.5">
+                          <h4 className="text-xs font-black uppercase tracking-widest text-white flex items-center gap-2">
+                            <Film className="w-4 h-4 text-[#E50914]" />
+                            Filmes ({organizedGroups.movies.length})
+                          </h4>
+                        </div>
+                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                          {organizedGroups.movies.map(group => (
+                            <div
+                              key={`movie-group-${group.contentId}`}
+                              className="bg-black/60 border border-white/10 rounded-2xl p-4 space-y-3"
+                            >
+                              <div className="flex items-center gap-3">
+                                <div className="w-10 h-14 rounded-lg bg-zinc-900 overflow-hidden shrink-0 border border-white/10">
+                                  {resolveTmdbPosterUrl(group.media?.posterPath, 'w185') ? (
+                                    <img
+                                      src={resolveTmdbPosterUrl(group.media?.posterPath, 'w185')}
+                                      alt={group.media?.title || 'Filme'}
+                                      className="w-full h-full object-cover"
+                                    />
+                                  ) : (
+                                    <div className="w-full h-full flex items-center justify-center text-zinc-700">
+                                      <Film className="w-4 h-4" />
+                                    </div>
+                                  )}
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  <h5 className="text-sm font-black text-white truncate">
+                                    {group.media?.title || `TMDB ${group.contentId}`}
+                                  </h5>
+                                  <p className="text-[10px] font-mono text-zinc-500">
+                                    Filme · TMDB {group.contentId} · {group.sources.length} fonte(s)
+                                  </p>
+                                </div>
+                              </div>
+
+                              <div className="space-y-3">
+                                {(() => {
+                                  const subGroups = new Map<string, VideoSource[]>();
+                                  for (const sItem of group.sources) {
+                                    const l = (sItem.audioLanguage || 'Português').trim() || 'Português';
+                                    const v =
+                                      formatVersionTypeLabel(
+                                        sItem.versionType ||
+                                          normalizeVersionType(undefined, sItem.serverName, sItem.audioLanguage)
+                                      ) || 'Versão Padrão';
+                                    const key = `${l} — ${v}`;
+                                    const list = subGroups.get(key) || [];
+                                    list.push(sItem);
+                                    subGroups.set(key, list);
+                                  }
+                                  return Array.from(subGroups.entries()).map(([subLabel, subSources]) => (
+                                    <div key={subLabel} className="space-y-1.5">
+                                      <div className="flex items-center justify-between px-1">
+                                        <span className="text-[10px] font-black uppercase tracking-wider text-zinc-400">
+                                          {subLabel}
+                                        </span>
+                                        <span className="text-[10px] font-mono text-zinc-600">{subSources.length}</span>
+                                      </div>
+                                      {subSources.map(src => {
+                                        const badge = getBadgeStyle(src.status);
+                                        const BadgeIcon = badge.icon;
+                                  return (
+                                    <div
+                                      key={src.id}
+                                      className="p-3 rounded-xl bg-white/[0.03] border border-white/10 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
+                                    >
+                                      <div className="min-w-0 space-y-1">
+                                        <div className="flex flex-wrap items-center gap-1.5">
+                                          <span className="text-xs font-bold text-white">
+                                            {formatSourceOrganizedLabel(src)}
+                                          </span>
+                                          {src.isPrimary && (
+                                            <span className="px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[9px] font-black uppercase">
+                                              Principal
+                                            </span>
+                                          )}
+                                          {src.enabled === false && (
+                                            <span className="px-1.5 py-0.5 rounded bg-red-500/15 border border-red-500/30 text-red-300 text-[9px] font-black uppercase">
+                                              Desativada
+                                            </span>
+                                          )}
+                                          {src.subtitleUrl && (
+                                            <span className="px-1.5 py-0.5 rounded bg-sky-500/15 border border-sky-500/30 text-sky-300 text-[9px] font-black uppercase inline-flex items-center gap-1">
+                                              <Subtitles className="w-2.5 h-2.5" /> Legenda
+                                            </span>
+                                          )}
+                                          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[9px] font-black uppercase ${badge.color}`}>
+                                            <BadgeIcon className={`w-2.5 h-2.5 ${badge.animate ? 'animate-spin' : ''}`} />
+                                            {badge.label}
+                                          </span>
+                                        </div>
+                                        <p className="text-[10px] font-mono text-zinc-400 truncate">
+                                          {src.serverName} · {src.format} · {src.originalUrl || src.url}
+                                        </p>
+                                      </div>
+
+                                      <div className="flex items-center gap-1 shrink-0">
+                                        <button
+                                          type="button"
+                                          onClick={() => openEditModalForSource(src)}
+                                          className="p-1.5 bg-white/5 hover:bg-white/10 text-zinc-300 rounded-lg"
+                                          title="Editar"
+                                        >
+                                          <Edit2 className="w-3.5 h-3.5" />
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => verifySource(src.id)}
+                                          disabled={verifyingId === src.id}
+                                          className="p-1.5 bg-white/5 hover:bg-white/10 text-emerald-400 rounded-lg"
+                                          title="Testar"
+                                        >
+                                          <ShieldCheck className={`w-3.5 h-3.5 ${verifyingId === src.id ? 'animate-spin' : ''}`} />
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => openPlayTest(src)}
+                                          className="p-1.5 bg-brand/15 hover:bg-brand text-brand hover:text-white rounded-lg"
+                                          title="Reproduzir Teste"
+                                        >
+                                          <Play className="w-3.5 h-3.5 fill-current" />
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => handleToggleEnabled(src)}
+                                          className={`p-1.5 rounded-lg ${
+                                            src.enabled === false ? 'bg-red-500/15 text-red-400' : 'bg-emerald-500/10 text-emerald-400'
+                                          }`}
+                                          title={src.enabled === false ? 'Ativar' : 'Desativar'}
+                                        >
+                                          <Power className="w-3.5 h-3.5" />
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => handleDeleteSource(src.id)}
+                                          className="p-1.5 bg-red-500/10 hover:bg-red-500 text-red-400 hover:text-white rounded-lg"
+                                          title="Eliminar"
+                                        >
+                                          <Trash2 className="w-3.5 h-3.5" />
+                                        </button>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                                    </div>
+                                  ));
+                                })()}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* SÉRIES HIERARCHICAL TREE: Série -> Temporada -> Episódio -> Fontes */}
+                    {organizedGroups.series.length > 0 && (
+                      <div className="space-y-4">
+                        <div className="flex items-center justify-between border-b border-white/10 pb-2.5">
+                          <h4 className="text-xs font-black uppercase tracking-widest text-white flex items-center gap-2">
+                            <Tv className="w-4 h-4 text-[#E50914]" />
+                            Séries ({organizedGroups.series.length}) · Série → Temporada → Episódio → Fontes
+                          </h4>
+                        </div>
+                        <div className="space-y-3">
+                          {organizedGroups.series.map(seriesGroup => {
+                            const seriesKey = String(seriesGroup.contentId);
+                            const isSeriesOpen =
+                              expandedSeries[seriesKey] !== undefined
+                                ? expandedSeries[seriesKey]
+                                : organizedGroups.series.length <= 3 || Boolean(searchTerm.trim());
+
+                            return (
+                              <div
+                                key={`series-group-${seriesKey}`}
+                                className="bg-black/60 border border-white/10 rounded-2xl overflow-hidden"
+                              >
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setExpandedSeries(prev => ({ ...prev, [seriesKey]: !isSeriesOpen }))
+                                  }
+                                  className="w-full p-4 flex items-center justify-between gap-3 hover:bg-white/[0.03] transition-colors text-left"
+                                >
+                                  <div className="flex items-center gap-3 min-w-0">
+                                    {isSeriesOpen ? (
+                                      <ChevronDown className="w-4 h-4 text-zinc-400 shrink-0" />
+                                    ) : (
+                                      <ChevronRight className="w-4 h-4 text-zinc-400 shrink-0" />
+                                    )}
+                                    <div className="w-9 h-12 rounded-lg bg-zinc-900 overflow-hidden shrink-0 border border-white/10">
+                                      {resolveTmdbPosterUrl(seriesGroup.media?.posterPath, 'w185') ? (
+                                        <img
+                                          src={resolveTmdbPosterUrl(seriesGroup.media?.posterPath, 'w185')}
+                                          alt={seriesGroup.media?.title || 'Série'}
+                                          className="w-full h-full object-cover"
+                                        />
+                                      ) : (
+                                        <div className="w-full h-full flex items-center justify-center text-zinc-700">
+                                          <Tv className="w-4 h-4" />
+                                        </div>
+                                      )}
+                                    </div>
+                                    <div className="min-w-0">
+                                      <h5 className="text-sm font-black text-white truncate">
+                                        {seriesGroup.media?.title || `Série TMDB ${seriesGroup.contentId}`}
+                                      </h5>
+                                      <p className="text-[10px] font-mono text-zinc-500">
+                                        TMDB {seriesGroup.contentId} · {seriesGroup.seasonsList.length} temporada(s) · {seriesGroup.totalSources} fonte(s)
+                                      </p>
+                                    </div>
+                                  </div>
+                                </button>
+
+                                {isSeriesOpen && (
+                                  <div className="px-4 pb-4 space-y-3 border-t border-white/5 pt-3">
+                                    {seriesGroup.seasonsList.map(seasonEntry => {
+                                      const seasonKey = `${seriesKey}-S${seasonEntry.seasonNumber}`;
+                                      const isSeasonOpen =
+                                        expandedSeasons[seasonKey] !== undefined
+                                          ? expandedSeasons[seasonKey]
+                                          : seriesGroup.seasonsList.length <= 2 || Boolean(searchTerm.trim());
+
+                                      return (
+                                        <div
+                                          key={seasonKey}
+                                          className="bg-white/[0.02] border border-white/10 rounded-xl overflow-hidden"
+                                        >
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              setExpandedSeasons(prev => ({ ...prev, [seasonKey]: !isSeasonOpen }))
+                                            }
+                                            className="w-full px-3.5 py-2.5 flex items-center justify-between hover:bg-white/[0.03] text-left"
+                                          >
+                                            <div className="flex items-center gap-2">
+                                              {isSeasonOpen ? (
+                                                <ChevronDown className="w-3.5 h-3.5 text-zinc-400" />
+                                              ) : (
+                                                <ChevronRight className="w-3.5 h-3.5 text-zinc-400" />
+                                              )}
+                                              <span className="text-xs font-black uppercase tracking-wider text-white">
+                                                {seasonEntry.seasonNumber === 0
+                                                  ? 'Especiais'
+                                                  : `Temporada ${seasonEntry.seasonNumber}`}
+                                              </span>
+                                            </div>
+                                            <span className="text-[10px] font-mono text-zinc-400">
+                                              {seasonEntry.episodes.length} episódio(s)
+                                            </span>
+                                          </button>
+
+                                          {isSeasonOpen && (
+                                            <div className="px-3.5 pb-3 space-y-2 border-t border-white/5 pt-2">
+                                              {seasonEntry.episodes.map(epEntry => (
+                                                <div
+                                                  key={`${seasonKey}-E${epEntry.episodeNumber}`}
+                                                  className="p-2.5 rounded-xl bg-black/60 border border-white/5 space-y-2"
+                                                >
+                                                  <div className="flex items-center justify-between text-[11px] font-bold text-zinc-200">
+                                                    <span>
+                                                      Episódio {String(epEntry.episodeNumber).padStart(2, '0')}
+                                                    </span>
+                                                    <span className="text-[10px] font-mono text-zinc-500">
+                                                      {epEntry.sources.length} fonte(s)
+                                                    </span>
+                                                  </div>
+
+                                                  <div className="space-y-1.5">
+                                                    {epEntry.sources.map(src => {
+                                                      const badge = getBadgeStyle(src.status);
+                                                      const BadgeIcon = badge.icon;
+                                                      return (
+                                                        <div
+                                                          key={src.id}
+                                                          className="p-2.5 rounded-lg bg-white/[0.02] border border-white/10 flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                                                        >
+                                                          <div className="min-w-0 space-y-0.5">
+                                                            <div className="flex flex-wrap items-center gap-1.5">
+                                                              <span className="text-[11px] font-bold text-white">
+                                                                {formatSourceOrganizedLabel(src)}
+                                                              </span>
+                                                              <span className="text-[10px] text-zinc-400">
+                                                                · {src.serverName} ({src.format})
+                                                              </span>
+                                                              {src.isPrimary && (
+                                                                <span className="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 text-[9px] font-black uppercase">
+                                                                  Principal
+                                                                </span>
+                                                              )}
+                                                              {src.enabled === false && (
+                                                                <span className="px-1.5 py-0.5 rounded bg-red-500/15 text-red-300 text-[9px] font-black uppercase">
+                                                                  Desativada
+                                                                </span>
+                                                              )}
+                                                              {src.subtitleUrl && (
+                                                                <span className="px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-300 text-[9px] font-black uppercase">
+                                                                  Legenda
+                                                                </span>
+                                                              )}
+                                                              <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[9px] font-black uppercase ${badge.color}`}>
+                                                                <BadgeIcon className={`w-2.5 h-2.5 ${badge.animate ? 'animate-spin' : ''}`} />
+                                                                {badge.label}
+                                                              </span>
+                                                            </div>
+                                                            <p className="text-[10px] font-mono text-zinc-500 truncate">
+                                                              {src.originalUrl || src.url}
+                                                            </p>
+                                                          </div>
+
+                                                          <div className="flex items-center gap-1 shrink-0">
+                                                            <button
+                                                              type="button"
+                                                              onClick={() => openEditModalForSource(src)}
+                                                              className="p-1.5 bg-white/5 hover:bg-white/10 text-zinc-300 rounded-lg"
+                                                              title="Editar"
+                                                            >
+                                                              <Edit2 className="w-3.5 h-3.5" />
+                                                            </button>
+                                                            <button
+                                                              type="button"
+                                                              onClick={() => verifySource(src.id)}
+                                                              disabled={verifyingId === src.id}
+                                                              className="p-1.5 bg-white/5 hover:bg-white/10 text-emerald-400 rounded-lg"
+                                                              title="Testar"
+                                                            >
+                                                              <ShieldCheck className={`w-3.5 h-3.5 ${verifyingId === src.id ? 'animate-spin' : ''}`} />
+                                                            </button>
+                                                            <button
+                                                              type="button"
+                                                              onClick={() => openPlayTest(src)}
+                                                              className="p-1.5 bg-brand/15 hover:bg-brand text-brand hover:text-white rounded-lg"
+                                                              title="Reproduzir Teste"
+                                                            >
+                                                              <Play className="w-3.5 h-3.5 fill-current" />
+                                                            </button>
+                                                            <button
+                                                              type="button"
+                                                              onClick={() => handleToggleEnabled(src)}
+                                                              className={`p-1.5 rounded-lg ${
+                                                                src.enabled === false ? 'bg-red-500/15 text-red-400' : 'bg-emerald-500/10 text-emerald-400'
+                                                              }`}
+                                                              title={src.enabled === false ? 'Ativar' : 'Desativar'}
+                                                            >
+                                                              <Power className="w-3.5 h-3.5" />
+                                                            </button>
+                                                            <button
+                                                              type="button"
+                                                              onClick={() => handleDeleteSource(src.id)}
+                                                              className="p-1.5 bg-red-500/10 hover:bg-red-500 text-red-400 hover:text-white rounded-lg"
+                                                              title="Eliminar"
+                                                            >
+                                                              <Trash2 className="w-3.5 h-3.5" />
+                                                            </button>
+                                                          </div>
+                                                        </div>
+                                                      );
+                                                    })}
+                                                  </div>
+                                                </div>
+                                              ))}
+                                            </div>
+                                          )}
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-left">
                 <thead>
@@ -786,7 +1379,7 @@ export const VideoSourcesManager: React.FC<VideoSourcesManagerProps> = ({
                     <th className="p-6">Conteúdo</th>
                     <th className="p-6">Servidor / URL Original</th>
                     <th className="p-6">Tipo / Formato</th>
-                    <th className="p-6">Idioma / Qualidade</th>
+                    <th className="p-6">Idioma / Versão / Qualidade</th>
                     <th className="p-6">Estado & Diagnóstico</th>
                     <th className="p-6 text-right">Ações</th>
                   </tr>
@@ -823,7 +1416,7 @@ export const VideoSourcesManager: React.FC<VideoSourcesManagerProps> = ({
                                 <p className="text-[10px] text-zinc-500 font-bold uppercase mt-1">
                                   {source.contentType === 'movie'
                                     ? 'Filme'
-                                    : `Série · T${source.seasonNumber || 1} E${source.episodeNumber || 1}`}
+                                    : `Série · T${source.seasonNumber ?? 1} E${source.episodeNumber ?? 1}`}
                                 </p>
                               </div>
                             </div>
@@ -867,18 +1460,18 @@ export const VideoSourcesManager: React.FC<VideoSourcesManagerProps> = ({
                           </td>
                           <td className="p-6">
                             <div className="space-y-1">
-                              <div className="flex items-center gap-2 text-zinc-400">
+                              <div className="flex items-center gap-2 text-zinc-300">
                                 <Languages className="w-3 h-3 text-zinc-500" />
-                                <span className="font-bold uppercase tracking-widest text-[9px]">
-                                  {source.audioLanguage || 'Português'}
+                                <span className="font-bold text-[10px]">
+                                  {formatSourceOrganizedLabel(source)}
                                 </span>
                               </div>
-                              <div className="flex items-center gap-2 text-zinc-500">
-                                <Zap className="w-3 h-3 text-amber-500" />
-                                <span className="font-bold uppercase tracking-widest text-[9px]">
-                                  {source.quality || '1080p'}
-                                </span>
-                              </div>
+                              {source.subtitleUrl && (
+                                <div className="flex items-center gap-1 text-sky-400 text-[9px] font-bold uppercase">
+                                  <Subtitles className="w-3 h-3" />
+                                  Legenda Externa
+                                </div>
+                              )}
                             </div>
                           </td>
                           <td className="p-6">
@@ -941,7 +1534,7 @@ export const VideoSourcesManager: React.FC<VideoSourcesManagerProps> = ({
                               </button>
                               <button
                                 type="button"
-                                onClick={() => setPlayTestSource(source)}
+                                onClick={() => openPlayTest(source)}
                                 className="px-2.5 py-2 bg-brand/15 hover:bg-brand text-brand hover:text-white rounded-xl transition-all flex items-center gap-1 text-[10px] font-bold"
                                 title="Reproduzir Teste"
                               >
@@ -950,16 +1543,7 @@ export const VideoSourcesManager: React.FC<VideoSourcesManagerProps> = ({
                               </button>
                               <button
                                 type="button"
-                                onClick={() => {
-                                  const existingUrl = source.originalUrl || source.url || '';
-                                  const stripped = stripMgebPrefix(existingUrl);
-                                  setModalUseMgebPrefix(!existingUrl || stripped.hadPrefix);
-                                  setCurrentSource(source);
-                                  setModalTestMessage(null);
-                                  setErrorMessage(null);
-                                  setSavingStatus('idle');
-                                  setShowModal(true);
-                                }}
+                                onClick={() => openEditModalForSource(source)}
                                 className="p-2 bg-white/5 hover:bg-white/10 text-zinc-400 hover:text-white rounded-xl transition-all"
                                 title="Editar Fonte"
                               >
@@ -994,6 +1578,7 @@ export const VideoSourcesManager: React.FC<VideoSourcesManagerProps> = ({
                 </tbody>
               </table>
             </div>
+            )}
           </div>
         </>
       ) : (
@@ -1336,14 +1921,15 @@ export const VideoSourcesManager: React.FC<VideoSourcesManagerProps> = ({
                         </label>
                         <input
                           type="number"
-                          min={1}
-                          value={currentSource?.seasonNumber || 1}
-                          onChange={(e) =>
+                          min={0}
+                          value={currentSource?.seasonNumber ?? 1}
+                          onChange={(e) => {
+                            const parsed = parseInt(e.target.value, 10);
                             setCurrentSource({
                               ...currentSource,
-                              seasonNumber: Math.max(1, parseInt(e.target.value, 10) || 1)
-                            })
-                          }
+                              seasonNumber: Math.max(0, isNaN(parsed) ? 1 : parsed)
+                            });
+                          }}
                           className="w-full bg-black border border-white/10 rounded-2xl px-4 py-3 text-sm text-white focus:border-brand outline-none"
                           required
                         />
@@ -1456,18 +2042,24 @@ export const VideoSourcesManager: React.FC<VideoSourcesManagerProps> = ({
                     onTestSource={handleModalTestSource}
                     onTogglePlayTest={() => {
                       if (currentSource?.url?.trim()) {
-                        setPlayTestSource({
+                        openPlayTest({
                           id: currentSource.id || 'modal-preview',
                           contentId: currentSource.contentId || 0,
                           contentType: (currentSource.contentType as any) || 'movie',
                           url: currentSource.url,
                           originalUrl: currentSource.url,
-                          format: (currentSource.format as any) || 'php_endpoint',
+                          format: (currentSource.format as any) || classifySourceUrl(currentSource.url).suggestedFormat,
+                          sourceKind: currentSource.sourceKind || classifySourceUrl(currentSource.url).sourceKind,
                           serverName: currentSource.serverName || 'Pré-visualização',
                           audioLanguage: currentSource.audioLanguage || 'Português',
+                          versionType: currentSource.versionType || 'dublado',
+                          subtitleUrl: currentSource.subtitleUrl || undefined,
+                          subtitleLanguage: currentSource.subtitleLanguage || undefined,
                           quality: currentSource.quality || '1080p',
+                          diagnostics: currentSource.diagnostics,
                           status: currentSource.status || 'registered',
-                          createdAt: new Date().toISOString()
+                          createdAt: new Date().toISOString(),
+                          updatedAt: new Date().toISOString()
                         });
                       }
                     }}
@@ -1499,15 +2091,48 @@ export const VideoSourcesManager: React.FC<VideoSourcesManagerProps> = ({
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                   <div className="space-y-2">
                     <label className="text-[10px] font-black uppercase tracking-widest text-zinc-500">
-                      Idioma do Áudio
+                      Idioma
                     </label>
-                    <input
-                      type="text"
-                      value={currentSource?.audioLanguage || 'Português'}
-                      onChange={(e) => setCurrentSource({ ...currentSource, audioLanguage: e.target.value })}
-                      className="w-full bg-black border border-white/10 rounded-2xl px-4 py-3 text-sm text-white focus:border-brand outline-none"
-                      placeholder="Ex: Português, Legendado"
-                    />
+                    <select
+                      value={isPresetAudioLanguage(currentSource?.audioLanguage) ? currentSource?.audioLanguage || 'Português' : 'Outro'}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setCurrentSource({ ...currentSource, audioLanguage: val === 'Outro' ? '' : val });
+                      }}
+                      className="w-full bg-black border border-white/10 rounded-2xl px-4 py-3 text-sm text-white focus:border-brand outline-none font-bold"
+                    >
+                      {AUDIO_LANGUAGE_OPTIONS.map((lang) => (
+                        <option key={lang} value={lang}>
+                          {lang}
+                        </option>
+                      ))}
+                    </select>
+                    {!isPresetAudioLanguage(currentSource?.audioLanguage) && (
+                      <input
+                        type="text"
+                        value={currentSource?.audioLanguage || ''}
+                        onChange={(e) => setCurrentSource({ ...currentSource, audioLanguage: e.target.value })}
+                        className="w-full bg-black border border-white/10 rounded-2xl px-4 py-2.5 text-sm text-white focus:border-brand outline-none mt-2"
+                        placeholder="Informe o idioma (ex: Japonês, Coreano)"
+                      />
+                    )}
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black uppercase tracking-widest text-zinc-500">
+                      Tipo de Versão
+                    </label>
+                    <select
+                      value={currentSource?.versionType || 'dublado'}
+                      onChange={(e) => setCurrentSource({ ...currentSource, versionType: e.target.value })}
+                      className="w-full bg-black border border-white/10 rounded-2xl px-4 py-3 text-sm text-white focus:border-brand outline-none font-bold"
+                    >
+                      {VERSION_TYPE_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
                   </div>
 
                   <div className="space-y-2">
@@ -1515,21 +2140,68 @@ export const VideoSourcesManager: React.FC<VideoSourcesManagerProps> = ({
                     <select
                       value={currentSource?.quality || '1080p'}
                       onChange={(e) => setCurrentSource({ ...currentSource, quality: e.target.value })}
-                      className="w-full bg-black border border-white/10 rounded-2xl px-4 py-3 text-sm text-white focus:border-brand outline-none"
+                      className="w-full bg-black border border-white/10 rounded-2xl px-4 py-3 text-sm text-white focus:border-brand outline-none font-bold"
                     >
-                      <option value="Automática">Automática</option>
-                      <option value="4K">4K Ultra HD</option>
-                      <option value="1080p">1080p Full HD</option>
-                      <option value="720p">720p HD</option>
-                      <option value="480p">480p SD</option>
+                      {SOURCE_QUALITY_OPTIONS.map((q) => (
+                        <option key={q} value={q}>
+                          {q === 'Automática'
+                            ? 'Automática / Desconhecida'
+                            : q === '4K'
+                              ? '4K (2160p Ultra HD)'
+                              : q === '1440p'
+                                ? '1440p (2K QHD)'
+                                : q === '1080p'
+                                  ? '1080p Full HD'
+                                  : q === '720p'
+                                    ? '720p HD'
+                                    : q}
+                        </option>
+                      ))}
                     </select>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black uppercase tracking-widest text-zinc-500">
+                      Legenda Externa (.srt / .vtt) — Opcional
+                    </label>
+                    <input
+                      type="url"
+                      value={currentSource?.subtitleUrl || ''}
+                      onChange={(e) => setCurrentSource({ ...currentSource, subtitleUrl: e.target.value })}
+                      className="w-full bg-black border border-white/10 rounded-2xl px-4 py-3 text-sm text-white font-mono focus:border-brand outline-none"
+                      placeholder="https://.../legenda.srt ou .vtt"
+                    />
+                  </div>
+
+                  <div className="space-y-2 md:col-span-2">
+                    <label className="text-[10px] font-black uppercase tracking-widest text-zinc-500">
+                      Idioma da Legenda — Opcional
+                    </label>
+                    <input
+                      type="text"
+                      value={currentSource?.subtitleLanguage || ''}
+                      onChange={(e) => setCurrentSource({ ...currentSource, subtitleLanguage: e.target.value })}
+                      className="w-full bg-black border border-white/10 rounded-2xl px-4 py-3 text-sm text-white focus:border-brand outline-none"
+                      placeholder="Ex: Português, Inglês, Espanhol"
+                    />
                   </div>
                 </div>
 
                 {savingStatus === 'error' && errorMessage && (
-                  <div className="p-3.5 bg-brand/10 border border-brand/30 rounded-xl text-brand text-xs font-bold flex items-center gap-2">
-                    <AlertTriangle className="w-4 h-4 shrink-0" />
-                    <span>{errorMessage}</span>
+                  <div className="p-3.5 bg-brand/10 border border-brand/30 rounded-xl text-brand text-xs font-bold flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="flex items-center gap-2">
+                      <AlertTriangle className="w-4 h-4 shrink-0" />
+                      <span>{errorMessage}</span>
+                    </div>
+                    {duplicateConflict && !currentSource?.id && (
+                      <button
+                        type="button"
+                        onClick={() => performSaveSource(true)}
+                        className="px-3.5 py-2 min-h-[40px] bg-brand hover:bg-brand/90 text-white text-[11px] font-black uppercase tracking-wider rounded-lg shrink-0 transition-all"
+                      >
+                        Substituir Fonte Existente
+                      </button>
+                    )}
                   </div>
                 )}
 
@@ -1654,7 +2326,7 @@ export const VideoSourcesManager: React.FC<VideoSourcesManagerProps> = ({
                     onClick={() => {
                       const target = diagnosticSource;
                       setDiagnosticSource(null);
-                      setPlayTestSource(target);
+                      openPlayTest(target);
                     }}
                     className="px-4 py-2 bg-brand text-white text-xs font-black uppercase rounded-xl flex items-center gap-2"
                   >
@@ -1685,14 +2357,34 @@ export const VideoSourcesManager: React.FC<VideoSourcesManagerProps> = ({
               exit={{ opacity: 0, scale: 0.96 }}
               className="w-full max-w-4xl bg-[#0c0c0c] border border-white/10 rounded-3xl overflow-hidden shadow-2xl"
             >
-              <div className="p-4 sm:p-5 border-b border-white/10 flex items-center justify-between">
-                <div>
-                  <h3 className="text-sm font-black text-white uppercase">
-                    Teste de Reprodução — {playTestSource.serverName}
-                  </h3>
-                  <p className="text-[10px] font-mono text-zinc-400 truncate max-w-xl">
+              <div className="p-4 sm:p-5 border-b border-white/10 flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h3 className="text-sm font-black text-white uppercase">
+                      Teste de Reprodução — {playTestSource.serverName}
+                    </h3>
+                    <span
+                      className={`px-2 py-0.5 rounded text-[10px] font-black uppercase ${
+                        playTestDiag.status === 'confirmed'
+                          ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                          : playTestDiag.status === 'format_error' || playTestDiag.status === 'connection_error'
+                            ? 'bg-red-500/20 text-red-300 border border-[#E50914]/40'
+                            : 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+                      }`}
+                    >
+                      {playTestDiag.status === 'confirmed'
+                        ? 'REPRODUÇÃO CONFIRMADA'
+                        : playTestDiag.status === 'format_error'
+                          ? 'ERRO DE FORMATO'
+                          : playTestDiag.status === 'connection_error'
+                            ? 'ERRO DE CONEXÃO'
+                            : 'TESTE EM ANDAMENTO'}
+                    </span>
+                  </div>
+                  <p className="text-[10px] font-mono text-zinc-400 truncate max-w-xl mt-0.5">
                     {playTestSource.originalUrl || playTestSource.url}
                   </p>
+                  <p className="text-[11px] text-zinc-300 mt-0.5">{playTestDiag.message}</p>
                 </div>
                 <button
                   type="button"
@@ -1710,16 +2402,37 @@ export const VideoSourcesManager: React.FC<VideoSourcesManagerProps> = ({
                         id: playTestSource.id,
                         url: playTestSource.url,
                         originalUrl: playTestSource.originalUrl || playTestSource.url,
-                        format: playTestSource.format,
-                        sourceKind: playTestSource.sourceKind,
+                        format: playTestSource.format || classifySourceUrl(playTestSource.url).suggestedFormat,
+                        sourceKind: playTestSource.sourceKind || classifySourceUrl(playTestSource.url).sourceKind,
                         serverName: playTestSource.serverName,
                         audioLanguage: playTestSource.audioLanguage,
+                        versionType: playTestSource.versionType,
+                        subtitleUrl: playTestSource.subtitleUrl,
+                        subtitleLanguage: playTestSource.subtitleLanguage,
                         quality: playTestSource.quality,
+                        diagnostics: playTestSource.diagnostics,
                         isPrimary: true
                       }
                     ]}
                     title={playTestSource.serverName}
                     autoplay={true}
+                    onPlaybackEvent={(status, message) => {
+                      if (status === 'STARTED') {
+                        setPlayTestDiag({
+                          status: 'confirmed',
+                          message: 'Stream inicializado e pronto no navegador.'
+                        });
+                      } else {
+                        const lower = (message || '').toLowerCase();
+                        setPlayTestDiag({
+                          status:
+                            lower.includes('formato') || lower.includes('descodificar') || lower.includes('html')
+                              ? 'format_error'
+                              : 'connection_error',
+                          message: message || 'Erro ao iniciar reprodução.'
+                        });
+                      }
+                    }}
                   />
                 </ErrorBoundary>
               </div>
